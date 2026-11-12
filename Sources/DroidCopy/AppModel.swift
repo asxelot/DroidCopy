@@ -63,7 +63,6 @@ final class AppModel: ObservableObject {
 
     private func monitorDevices() async {
         guard let adb else {
-            deviceStatus = "adb wasn’t found. Install it by running this in Terminal, then reopen DroidCopy:"
             adbMissing = true
             return
         }

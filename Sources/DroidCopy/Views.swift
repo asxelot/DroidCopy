@@ -98,13 +98,25 @@ struct DevicePane: View {
                 .disabled(model.deviceSelection.isEmpty)
                 .help("Copy the selected items to a folder on your Mac")
             }
-            if model.device == nil {
+            if model.adbMissing {
+                ContentUnavailableView {
+                    Label("adb Isn’t Installed", systemImage: "terminal")
+                } description: {
+                    Text("DroidCopy needs adb to talk to your device.\nInstall it by running this command in Terminal:")
+                } actions: {
+                    VStack(spacing: 10) {
+                        CopyableCommand(command: AppModel.adbInstallCommand)
+                        Text("Then quit and reopen DroidCopy.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.device == nil {
                 ContentUnavailableView {
                     Label("No Device", systemImage: "cable.connector.slash")
                 } description: {
                     Text(model.deviceStatus)
-                } actions: {
-                    if model.adbMissing { CopyableCommand(command: AppModel.adbInstallCommand) }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -404,31 +416,46 @@ final class CopyFeedback: ObservableObject {
     @Published var copied = false
 }
 
-/// A shell command shown in monospace with a button that puts it on the clipboard.
+/// A shell command styled like a GitHub code block, with a small copy button inside it.
 struct CopyableCommand: View {
     let command: String
     @StateObject private var feedback = CopyFeedback()
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 12) {
             Text(command)
-                .font(.system(.body, design: .monospaced))
+                .font(.system(size: 12, design: .monospaced))
+                .lineLimit(1)
+                .fixedSize()
                 .textSelection(.enabled)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(command, forType: .string)
-                feedback.copied = true
-                Task { @MainActor [feedback] in
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    feedback.copied = false
-                }
-            } label: {
-                Label(feedback.copied ? "Copied" : "Copy", systemImage: feedback.copied ? "checkmark" : "doc.on.doc")
+            Button(action: copy) {
+                Image(systemName: feedback.copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(feedback.copied ? Color.green : Color.secondary)
+                    .frame(width: 24, height: 22)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 5))
+                    .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.primary.opacity(0.12)))
+                    .contentShape(Rectangle())
             }
-            .help("Copy the command to the clipboard")
+            .buttonStyle(.plain)
+            .help(feedback.copied ? "Copied!" : "Copy to clipboard")
+            .accessibilityLabel(feedback.copied ? "Copied" : "Copy")
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 6)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.12)))
+        .fixedSize()
+    }
+
+    private func copy() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+        feedback.copied = true
+        Task { @MainActor [feedback] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            feedback.copied = false
         }
     }
 }
