@@ -399,10 +399,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func copySelectedToMac() {
-        copyToMac(deviceItems.filter { deviceSelection.contains($0.id) })
-    }
-
     private func submit(_ batch: PendingBatch) {
         guard !batch.plans.isEmpty else { return }
         if batch.conflicts.isEmpty {

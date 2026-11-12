@@ -51,7 +51,7 @@ what was copied.
   exist on the Mac, so ⌘C first pulls the items into `~/Library/Caches/DroidCopy/Clipboard`
   (you'll see the progress) and puts them on the clipboard when they're done. For very large
   files, dragging or **Copy to Mac…** is better because they don't make that extra copy.
-- **Copy to Mac…** (toolbar or right-click) asks for a folder and copies there.
+- **Copy to Mac…** on the right-click menu asks for a folder and copies there.
 
 **Other actions:** New Folder, and Rename… and Delete… on the right-click menu. Delete (⌫) also
 works on the selection.

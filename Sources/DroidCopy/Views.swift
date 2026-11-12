@@ -102,11 +102,6 @@ struct DevicePane: View {
                     Label("New Folder", systemImage: "folder.badge.plus")
                 }
                 .disabled(model.device == nil)
-                Button { model.copySelectedToMac() } label: {
-                    Label("Copy to Mac…", systemImage: "arrow.down.circle")
-                }
-                .disabled(model.deviceSelection.isEmpty)
-                .help("Copy the selected items to a folder on your Mac")
                 if model.device != nil {
                     EjectButton(queue: model.queue)
                 }
