@@ -30,6 +30,8 @@ final class AppModel: ObservableObject {
     // Device side
     @Published var device: DeviceInfo?
     @Published var deviceStatus = "Looking for a device…"
+    @Published var adbMissing = false
+    static let adbInstallCommand = "brew install android-platform-tools"
     @Published var storages: [StorageRoot] = []
     @Published var storage: StorageRoot?
     @Published var deviceDir = ""
@@ -61,7 +63,8 @@ final class AppModel: ObservableObject {
 
     private func monitorDevices() async {
         guard let adb else {
-            deviceStatus = "adb wasn’t found.\nInstall it with:  brew install android-platform-tools"
+            deviceStatus = "adb wasn’t found. Install it by running this in Terminal, then reopen DroidCopy:"
+            adbMissing = true
             return
         }
         while true {

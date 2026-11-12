@@ -187,3 +187,10 @@ import Testing
         #expect(RunResult(output: "", error: "", status: 0).ok)
     }
 }
+
+@Suite struct AdbLocateTests {
+    @Test func environmentOverrideWins() {
+        #expect(Adb.locate(environment: ["DROIDCOPY_ADB": "/bin/ls"])?.path == "/bin/ls")
+        #expect(Adb.locate(environment: ["DROIDCOPY_ADB": "/nonexistent/adb"]) == nil)
+    }
+}

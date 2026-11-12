@@ -33,7 +33,11 @@ public final class Adb: @unchecked Sendable {
     public init(path: String) { self.path = path }
 
     /// Apps launched from Finder don't get the shell PATH, so look in the usual places.
-    public static func locate() -> Adb? {
+    /// `DROIDCOPY_ADB` in the environment overrides the search (used to test the "not installed" screen).
+    public static func locate(environment: [String: String] = ProcessInfo.processInfo.environment) -> Adb? {
+        if let forced = environment["DROIDCOPY_ADB"] {
+            return FileManager.default.isExecutableFile(atPath: forced) ? Adb(path: forced) : nil
+        }
         let candidates = [
             "/opt/homebrew/bin/adb",
             "/usr/local/bin/adb",

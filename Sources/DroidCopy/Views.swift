@@ -103,6 +103,8 @@ struct DevicePane: View {
                     Label("No Device", systemImage: "cable.connector.slash")
                 } description: {
                     Text(model.deviceStatus)
+                } actions: {
+                    if model.adbMissing { CopyableCommand(command: AppModel.adbInstallCommand) }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -392,6 +394,41 @@ struct TransferRow: View {
             return "Failed: \(message)"
         case .cancelled:
             return "Cancelled. The unfinished copy was deleted."
+        }
+    }
+}
+
+/// Briefly true after a copy, so the button can say "Copied".
+/// (An ObservableObject because `@State` needs a macro plugin the Command Line Tools lack.)
+final class CopyFeedback: ObservableObject {
+    @Published var copied = false
+}
+
+/// A shell command shown in monospace with a button that puts it on the clipboard.
+struct CopyableCommand: View {
+    let command: String
+    @StateObject private var feedback = CopyFeedback()
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(command)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(command, forType: .string)
+                feedback.copied = true
+                Task { @MainActor [feedback] in
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    feedback.copied = false
+                }
+            } label: {
+                Label(feedback.copied ? "Copied" : "Copy", systemImage: feedback.copied ? "checkmark" : "doc.on.doc")
+            }
+            .help("Copy the command to the clipboard")
         }
     }
 }
