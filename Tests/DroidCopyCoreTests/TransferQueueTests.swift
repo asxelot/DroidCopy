@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 @testable import DroidCopyCore
@@ -418,5 +419,48 @@ import Testing
         try? await Task.sleep(nanoseconds: 200_000_000)
         #expect(ok.state == .done && missing.state.isFailed && cancelled.state == .cancelled)
         #expect(calls == [ok.id: 1, missing.id: 1, cancelled.id: 1])
+    }
+}
+
+@Suite @MainActor struct ProgressVisibilityTests {
+    @Test func quickCopiesNeverShowProgress() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let src = try fake.macDir().appendingPathComponent("small.txt")
+        try writeFile(src.path, "abc")
+        let dev = try fake.deviceDir()
+
+        let q = TransferQueue(adb: fake.adb)
+        q.progressDelay = 1.5
+        var seen: [Bool] = []
+        let watch = q.$showsProgress.sink { seen.append($0) }
+        defer { watch.cancel() }
+        q.add([Transfer(direction: .toDevice, serial: "FAKE123", source: src.path, destDir: dev,
+                        name: "small.txt", isDirectory: false, replace: false)])
+        await waitIdle(q)
+        try? await Task.sleep(nanoseconds: 1_800_000_000) // past the delay: the reveal must not fire late
+        #expect(!seen.contains(true))
+    }
+
+    @Test func longCopiesShowProgressAfterTheDelayUntilDone() async throws {
+        let fake = try FakeAdb(push: .hang)
+        defer { fake.cleanUp() }
+        let src = try fake.macDir().appendingPathComponent("big.bin")
+        try writeFile(src.path, "0123456789")
+        let dev = try fake.deviceDir()
+
+        let q = TransferQueue(adb: fake.adb)
+        q.progressDelay = 0.4
+        let t = Transfer(direction: .toDevice, serial: "FAKE123", source: src.path, destDir: dev,
+                         name: "big.bin", isDirectory: false, replace: false)
+        q.add([t])
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        #expect(!q.showsProgress, "not before the delay")
+        await waitUntil { q.showsProgress }
+        #expect(q.showsProgress)
+
+        q.cancel(t)
+        await waitIdle(q)
+        #expect(!q.showsProgress, "hidden again once nothing is copying")
     }
 }

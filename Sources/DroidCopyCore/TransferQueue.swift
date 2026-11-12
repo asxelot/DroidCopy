@@ -90,6 +90,13 @@ public final class TransferQueue: ObservableObject {
     private let adb: Adb
     private var busy = false
 
+    /// True once copying has gone on for `progressDelay` without a break, so quick copies of small
+    /// files don't flash the progress list on screen. False again when nothing is left to copy.
+    @Published public private(set) var showsProgress = false
+    public var progressDelay: TimeInterval = 2
+    /// Bumped whenever the queue goes busy or idle, so a stale delayed reveal does nothing.
+    private var busyPeriod = 0
+
     public init(adb: Adb) { self.adb = adb }
 
     public var hasActive: Bool { activeCount > 0 }
@@ -105,8 +112,22 @@ public final class TransferQueue: ObservableObject {
     }
 
     private func updateActive() {
+        let wasActive = activeCount > 0
         activeCount = items.filter { !$0.state.isFinished }.count
         failedCount = items.filter(\.state.isFailed).count
+        if activeCount == 0 {
+            if wasActive { busyPeriod += 1 }
+            showsProgress = false
+        } else if !wasActive {
+            busyPeriod += 1
+            let period = busyPeriod
+            let delay = progressDelay
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self, self.busyPeriod == period, self.activeCount > 0 else { return }
+                self.showsProgress = true
+            }
+        }
     }
 
     /// One alert's worth of text about failed transfers, or nil if none failed.
