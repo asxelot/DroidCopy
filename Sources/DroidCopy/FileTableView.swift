@@ -49,10 +49,12 @@ struct FileTable: NSViewRepresentable {
             c.sortDescriptorPrototype = NSSortDescriptor(key: id, ascending: ascending)
             table.addTableColumn(c)
         }
-        column("name", "Name", width: 400, min: 120, max: 10_000, ascending: true)
-        column("size", "Size", width: 85, min: 60, max: 120, ascending: false)
-        column("modified", "Modified", width: 130, min: 80, max: 170, ascending: false)
-        table.tableColumns[1].headerCell.alignment = .right
+        // Finder's list view columns, in Finder's order.
+        column("name", "Name", width: 320, min: 120, max: 10_000, ascending: true)
+        column("modified", "Date Modified", width: 170, min: 90, max: 260, ascending: false)
+        column("size", "Size", width: 80, min: 60, max: 120, ascending: false)
+        column("kind", "Kind", width: 150, min: 70, max: 300, ascending: true)
+        table.tableColumns.first { $0.identifier.rawValue == "size" }?.headerCell.alignment = .right
         table.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
         table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
 
@@ -159,6 +161,8 @@ struct FileTable: NSViewRepresentable {
                 cell.imageView?.contentTintColor = item.isDirectory ? .controlAccentColor : .secondaryLabelColor
             case "size":
                 cell.textField?.stringValue = item.isDirectory ? "--" : Fmt.bytes(item.size)
+            case "kind":
+                cell.textField?.stringValue = item.kind
             default:
                 cell.textField?.stringValue = item.modified.map(Fmt.date) ?? ""
             }

@@ -57,8 +57,10 @@ public enum Fmt {
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateStyle = .short
+        // Like Finder: "13 May 2017 at 14:54", "Today at 09:30".
+        f.dateStyle = .medium
         f.timeStyle = .short
+        f.doesRelativeDateFormatting = true
         return f
     }()
 

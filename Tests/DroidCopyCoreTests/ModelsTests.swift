@@ -147,6 +147,22 @@ import DroidCopyTestSupport
         #expect(items.sorted(by: .modified, ascending: false).map(\.name) == ["Zdir", "adir", "a10.bin", "a2.bin", "b.txt"])
     }
 
+    @Test func kindSortGroupsTypesThenNames() {
+        let mixed = [file("z.jpg", 1, 0), file("b.txt", 1, 0), file("a.jpg", 1, 0), file("dir", 0, 0, dir: true)]
+        #expect(mixed.sorted(by: .kind, ascending: true).map(\.name) == ["dir", "a.jpg", "z.jpg", "b.txt"])
+        #expect(mixed.sorted(by: .kind, ascending: false).map(\.name) == ["dir", "b.txt", "a.jpg", "z.jpg"])
+    }
+
+    @Test func kindReadsLikeFinder() {
+        let kind = { (name: String, dir: Bool) in FileItem(name: name, path: "/x/" + name, isDirectory: dir, size: 0, modified: nil).kind }
+        #expect(kind("ROMs", true) == "Folder")
+        #expect(kind("photo.JPG", false) == "JPEG image")
+        #expect(kind("autorun.inf", false) == "INF file")
+        #expect(kind("README", false) == "Document")
+        #expect(kind(".nomedia", false) == "Document")
+        #expect(kind("notes.txt", false) == "Text")
+    }
+
     @Test func tiesFallBackToName() {
         let same = [file("b", 5, 1), file("a", 5, 1), file("c", 5, 1)]
         #expect(same.sorted(by: .size, ascending: false).map(\.name) == ["a", "b", "c"])
