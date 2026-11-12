@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import DroidCopyCore
+import DroidCopyTestSupport
 
 /// Real adb push/pull against a connected device.
 /// Run with: DROIDCOPY_DEVICE=<serial> swift test --filter DeviceIntegrationTests

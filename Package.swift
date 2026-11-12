@@ -7,6 +7,9 @@ let package = Package(
     targets: [
         .target(name: "DroidCopyCore"),
         .executableTarget(name: "DroidCopy", dependencies: ["DroidCopyCore"]),
-        .testTarget(name: "DroidCopyCoreTests", dependencies: ["DroidCopyCore"]),
+        // A fake adb and small async helpers shared by both test targets.
+        .target(name: "DroidCopyTestSupport", dependencies: ["DroidCopyCore"], path: "Tests/DroidCopyTestSupport"),
+        .testTarget(name: "DroidCopyCoreTests", dependencies: ["DroidCopyCore", "DroidCopyTestSupport"]),
+        .testTarget(name: "DroidCopyAppTests", dependencies: ["DroidCopy", "DroidCopyCore", "DroidCopyTestSupport"]),
     ]
 )

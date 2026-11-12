@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import DroidCopyCore
+import DroidCopyTestSupport
 
 /// `Adb` commands end to end against `FakeAdb`, including names that need shell quoting.
 @Suite struct AdbTests {

@@ -1,6 +1,8 @@
 import Foundation
+import UniformTypeIdentifiers
 import Testing
 @testable import DroidCopyCore
+import DroidCopyTestSupport
 
 @Suite struct ModelsTests {
     private func item(_ name: String, dir: Bool = false) -> FileItem {
@@ -122,5 +124,39 @@ import Testing
         try writeFile(dir.appendingPathComponent("real").path, String(repeating: "x", count: 4000))
         try FileManager.default.createSymbolicLink(atPath: dir.appendingPathComponent("link").path, withDestinationPath: "real")
         #expect(LocalFS.size(dir.appendingPathComponent("link")) == 4000)
+    }
+}
+
+@Suite struct TableSortTests {
+    private let t0 = Date(timeIntervalSince1970: 1000)
+    private func file(_ name: String, _ size: Int64, _ age: Double, dir: Bool = false) -> FileItem {
+        FileItem(name: name, path: "/x/" + name, isDirectory: dir, size: size, modified: Date(timeIntervalSince1970: 1000 + age))
+    }
+    private var items: [FileItem] {
+        [file("b.txt", 30, 1), file("a10.bin", 10, 3), file("a2.bin", 20, 2), file("Zdir", 0, 9, dir: true), file("adir", 0, 0, dir: true)]
+    }
+
+    @Test func nameSortUsesFinderOrderBothWays() {
+        #expect(items.sorted(by: .name, ascending: true).map(\.name) == ["adir", "Zdir", "a2.bin", "a10.bin", "b.txt"])
+        #expect(items.sorted(by: .name, ascending: false).map(\.name) == ["Zdir", "adir", "b.txt", "a10.bin", "a2.bin"])
+    }
+
+    @Test func sizeAndDateSortKeepFoldersFirst() {
+        #expect(items.sorted(by: .size, ascending: false).map(\.name) == ["adir", "Zdir", "b.txt", "a2.bin", "a10.bin"])
+        #expect(items.sorted(by: .size, ascending: true).map(\.name) == ["adir", "Zdir", "a10.bin", "a2.bin", "b.txt"])
+        #expect(items.sorted(by: .modified, ascending: false).map(\.name) == ["Zdir", "adir", "a10.bin", "a2.bin", "b.txt"])
+    }
+
+    @Test func tiesFallBackToName() {
+        let same = [file("b", 5, 1), file("a", 5, 1), file("c", 5, 1)]
+        #expect(same.sorted(by: .size, ascending: false).map(\.name) == ["a", "b", "c"])
+        #expect(same.sorted(by: .modified, ascending: true).map(\.name) == ["a", "b", "c"])
+    }
+
+    @Test func contentTypeForFinder() {
+        #expect(file("Saves", 0, 0, dir: true).contentType == .folder)
+        #expect(file("photo.jpg", 1, 0).contentType == .jpeg)
+        #expect(file("game.nsp", 1, 0).contentType.conforms(to: .data))
+        #expect(file("README", 1, 0).contentType == .data)
     }
 }

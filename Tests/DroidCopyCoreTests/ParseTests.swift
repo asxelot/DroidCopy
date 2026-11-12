@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import DroidCopyCore
+import DroidCopyTestSupport
 
 @Suite struct ParseTests {
     @Test func devicesSkipsHeaderAndDaemonLines() {

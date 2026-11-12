@@ -2,6 +2,7 @@ import Combine
 import Foundation
 import Testing
 @testable import DroidCopyCore
+import DroidCopyTestSupport
 
 /// `TransferQueue` against `FakeAdb`: copying both ways, conflicts, free space, failures and cancelling.
 @Suite @MainActor struct TransferQueueTests {

@@ -75,9 +75,14 @@ swift build
 swift test
 ```
 
-The unit tests don't need a device. `Tests/DroidCopyCoreTests/FakeAdb.swift` is a stand-in
+The unit tests don't need a device. `Tests/DroidCopyTestSupport/FakeAdb.swift` is a stand-in
 `adb` that runs "device" commands against a temporary folder on the Mac, so listing, copying,
 replacing, free space, cancelling and failures are all tested end to end.
+
+- `DroidCopyCoreTests` cover adb commands, parsing and the transfer queue.
+- `DroidCopyAppTests` cover the app's logic: browsing, name clashes, Finder drops, ⌘C to the
+  clipboard, failure alerts and the file table. They use a private clipboard and a temporary
+  cache folder, so running them never touches your real clipboard.
 
 The device tests copy real files to `/storage/emulated/0/Download/droidcopy-test` and remove
 them afterwards. They run only when you name a device:

@@ -1,11 +1,11 @@
 import Foundation
-@testable import DroidCopyCore
+import DroidCopyCore
 
 /// A stand-in `adb` that runs "device" shell commands on this Mac, so `Adb` and `TransferQueue`
 /// can be tested without a phone. `push`/`pull` become `cp -R`; toybox's `stat -c` is emulated
 /// with BSD `stat -f`. Each instance lives in its own temp folder, so tests can run in parallel.
-struct FakeAdb {
-    enum CopyMode: String {
+public struct FakeAdb {
+    public enum CopyMode: String, Sendable {
         case normal
         /// Exits with an adb-style error after leaving a partial file behind.
         case fail
@@ -15,11 +15,11 @@ struct FakeAdb {
         case hang
     }
 
-    let root: URL
-    let adb: Adb
+    public let root: URL
+    public let adb: Adb
 
     /// - freeKB: when set, `df -k` on the "device" reports this many kilobytes available.
-    init(push: CopyMode = .normal, pull: CopyMode = .normal, freeKB: Int64? = nil,
+    public init(push: CopyMode = .normal, pull: CopyMode = .normal, freeKB: Int64? = nil,
          devicesOutput: String = "List of devices attached\nFAKE123  device product:x model:Fake_Phone\n") throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("fakeadb-\(UUID().uuidString)")
         let bin = root.appendingPathComponent("bin")
@@ -73,20 +73,20 @@ struct FakeAdb {
     }
 
     /// A scratch folder that plays the "device" side.
-    func deviceDir(_ name: String = "device") throws -> String {
+    public func deviceDir(_ name: String = "device") throws -> String {
         let url = root.appendingPathComponent(name)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url.path
     }
 
     /// A scratch folder that plays the Mac side.
-    func macDir(_ name: String = "mac") throws -> URL {
+    public func macDir(_ name: String = "mac") throws -> URL {
         let url = root.appendingPathComponent(name)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
 
-    func cleanUp() { try? FileManager.default.removeItem(at: root) }
+    public func cleanUp() { try? FileManager.default.removeItem(at: root) }
 
     private static func write(_ url: URL, _ script: String) throws {
         try (script + "\n").write(to: url, atomically: true, encoding: .utf8)
@@ -94,17 +94,17 @@ struct FakeAdb {
     }
 }
 
-func writeFile(_ path: String, _ contents: String) throws {
+public func writeFile(_ path: String, _ contents: String) throws {
     try contents.write(toFile: path, atomically: true, encoding: .utf8)
 }
 
-func readFile(_ path: String) -> String? {
+public func readFile(_ path: String) -> String? {
     try? String(contentsOfFile: path, encoding: .utf8)
 }
 
 /// Waits until the queue has nothing waiting or running.
 @MainActor
-func waitIdle(_ q: TransferQueue, seconds: Double = 20) async {
+public func waitIdle(_ q: TransferQueue, seconds: Double = 20) async {
     let deadline = Date().addingTimeInterval(seconds)
     while q.hasActive && Date() < deadline {
         try? await Task.sleep(nanoseconds: 20_000_000)
@@ -113,7 +113,7 @@ func waitIdle(_ q: TransferQueue, seconds: Double = 20) async {
 
 /// Waits until `condition` holds or the timeout passes.
 @MainActor
-func waitUntil(seconds: Double = 10, _ condition: () -> Bool) async {
+public func waitUntil(seconds: Double = 10, _ condition: () -> Bool) async {
     let deadline = Date().addingTimeInterval(seconds)
     while !condition() && Date() < deadline {
         try? await Task.sleep(nanoseconds: 20_000_000)

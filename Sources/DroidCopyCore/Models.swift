@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 public struct FileItem: Identifiable, Hashable, Sendable {
     public var id: String { path }
@@ -20,6 +21,10 @@ public struct FileItem: Identifiable, Hashable, Sendable {
     }
 }
 
+public enum FileSortKey: String, Sendable {
+    case name, size, modified
+}
+
 public extension Array where Element == FileItem {
     /// Folders first, then Finder-style name order.
     func sortedForDisplay() -> [FileItem] {
@@ -27,6 +32,30 @@ public extension Array where Element == FileItem {
             if a.isDirectory != b.isDirectory { return a.isDirectory }
             return a.name.localizedStandardCompare(b.name) == .orderedAscending
         }
+    }
+
+    /// Column sort for the file table: folders stay above files, and ties fall back to name order.
+    func sorted(by key: FileSortKey, ascending: Bool) -> [FileItem] {
+        let byName: (FileItem, FileItem) -> Bool = { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        let s = sorted { a, b in
+            switch key {
+            case .size where a.size != b.size: return ascending ? a.size < b.size : a.size > b.size
+            case .modified where a.sortDate != b.sortDate: return ascending ? a.sortDate < b.sortDate : a.sortDate > b.sortDate
+            case .name: return ascending ? byName(a, b) : byName(b, a)
+            default: return byName(a, b)
+            }
+        }
+        return s.filter(\.isDirectory) + s.filter { !$0.isDirectory }
+    }
+}
+
+public extension FileItem {
+    /// The type announced to Finder when the item is dragged out.
+    var contentType: UTType {
+        if isDirectory { return .folder }
+        let ext = (name as NSString).pathExtension
+        guard !ext.isEmpty, let t = UTType(filenameExtension: ext), t.conforms(to: .data) else { return .data }
+        return t
     }
 }
 

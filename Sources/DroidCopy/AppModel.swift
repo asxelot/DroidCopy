@@ -45,10 +45,18 @@ final class AppModel: ObservableObject {
     @Published var alertMessage: String?
 
     private var started = false
+    /// The clipboard ⌘C writes to, and the folder it pulls into first. Injected so tests don't
+    /// touch the real clipboard or caches.
+    let pasteboard: NSPasteboard
+    let clipboardCache: URL
 
-    init() {
-        let adb = Adb.locate()
+    nonisolated static let defaultClipboardCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("DroidCopy/Clipboard")
+
+    init(adb: Adb? = Adb.locate(), pasteboard: NSPasteboard = .general, clipboardCache: URL = AppModel.defaultClipboardCache) {
         self.adb = adb
+        self.pasteboard = pasteboard
+        self.clipboardCache = clipboardCache
         self.queue = TransferQueue(adb: adb ?? Adb(path: "/usr/bin/false"))
         queue.onFinished = { [weak self] t in self?.transferFinished(t) }
     }
@@ -120,29 +128,36 @@ final class AppModel: ObservableObject {
         Task { await loadDevice() }
     }
 
+    /// Loads are numbered as they start. A result is shown only if no newer load's result already
+    /// is, so an older, slower load of the same folder can't put back a stale listing, and a caller
+    /// that awaits a load always sees a listing at least that fresh.
+    private var loadsStarted = 0
+    private var loadShown = 0
+
     func loadDevice() async {
         guard let adb, let d = device, !deviceDir.isEmpty else { return }
         let dir = deviceDir
+        loadsStarted += 1
+        let generation = loadsStarted
         deviceLoading = true
-        do {
-            let items = try await adb.list(d.serial, dir)
-            if dir == deviceDir {
-                deviceItems = items
-                deviceError = nil
-                let ids = Set(items.map(\.id))
-                deviceSelection = deviceSelection.filter { ids.contains($0) }
-            }
-        } catch {
-            if dir == deviceDir {
-                deviceItems = []
-                deviceError = error.localizedDescription
-            }
-        }
+        let listing: Result<[FileItem], Error>
+        do { listing = .success(try await adb.list(d.serial, dir)) } catch { listing = .failure(error) }
         let free = await adb.freeBytes(d.serial, dir)
-        if dir == deviceDir {
-            deviceFree = free
-            deviceLoading = false
+        guard dir == deviceDir, generation > loadShown else { return }
+        loadShown = generation
+        switch listing {
+        case .success(let items):
+            deviceItems = items
+            deviceError = nil
+            let ids = Set(items.map(\.id))
+            deviceSelection = deviceSelection.filter { ids.contains($0) }
+        case .failure(let error):
+            deviceItems = []
+            deviceError = error.localizedDescription
         }
+        deviceFree = free
+        // Still loading if a newer load is on its way.
+        deviceLoading = generation != loadsStarted
     }
 
     var deviceCanGoUp: Bool {
@@ -281,8 +296,6 @@ final class AppModel: ObservableObject {
     /// Finder only pastes real files, and something (clipboard history) reads the clipboard as soon
     /// as it changes, so a lazy promise wouldn't stay lazy. Instead ⌘C pulls the items into a cache
     /// folder (with progress in the transfer list) and then puts those files on the clipboard.
-    private static let clipboardCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("DroidCopy/Clipboard")
     private var clipboardCopy: (token: UUID, dir: URL, transfers: [Transfer])?
 
     func copyToClipboard(_ items: [FileItem]) {
@@ -296,13 +309,13 @@ final class AppModel: ObservableObject {
         }
 
         let token = UUID()
-        let dir = Self.clipboardCache.appendingPathComponent(token.uuidString)
+        let dir = clipboardCache.appendingPathComponent(token.uuidString)
         do { try fm.createDirectory(at: dir, withIntermediateDirectories: true) } catch {
             alertMessage = "Couldn’t prepare the copy: \(error.localizedDescription)"
             return
         }
         // Nothing stale gets pasted while the files are on their way.
-        NSPasteboard.general.clearContents()
+        pasteboard.clearContents()
 
         let transfers = items.map { item -> Transfer in
             let t = Transfer(direction: .toMac, serial: d.serial, source: item.path, destDir: dir.path,
@@ -328,16 +341,16 @@ final class AppModel: ObservableObject {
         guard copy.transfers.allSatisfy(\.state.isFinished) else { return }
         let urls = copy.transfers.filter { $0.state == .done }.map { URL(fileURLWithPath: $0.destPath) }
         guard !urls.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects(urls as [NSURL])
+        pasteboard.clearContents()
+        pasteboard.writeObjects(urls as [NSURL])
     }
 
     /// Clipboard copies left over from earlier runs, except the current one.
     func removeStaleClipboardCopies() {
         let fm = FileManager.default
         let keep = clipboardCopy?.dir.lastPathComponent
-        for name in (try? fm.contentsOfDirectory(atPath: Self.clipboardCache.path)) ?? [] where name != keep {
-            try? fm.removeItem(at: Self.clipboardCache.appendingPathComponent(name))
+        for name in (try? fm.contentsOfDirectory(atPath: clipboardCache.path)) ?? [] where name != keep {
+            try? fm.removeItem(at: clipboardCache.appendingPathComponent(name))
         }
     }
 

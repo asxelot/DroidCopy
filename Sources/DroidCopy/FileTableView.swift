@@ -86,7 +86,7 @@ struct FileTable: NSViewRepresentable {
         private(set) var rows: [FileItem] = []
         private var shownItems: [FileItem] = []
         private var applyingSelection = false
-        nonisolated(unsafe) private let promiseQueue: OperationQueue = {
+        private let promiseQueue: OperationQueue = {
             let q = OperationQueue()
             q.qualityOfService = .userInitiated
             return q
@@ -107,17 +107,8 @@ struct FileTable: NSViewRepresentable {
         }
 
         private func sorted(_ items: [FileItem]) -> [FileItem] {
-            let d = table?.sortDescriptors.first ?? NSSortDescriptor(key: "name", ascending: true)
-            let byName: (FileItem, FileItem) -> Bool = { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-            let s = items.sorted { a, b in
-                switch d.key {
-                case "size" where a.size != b.size: return d.ascending ? a.size < b.size : a.size > b.size
-                case "modified" where a.sortDate != b.sortDate: return d.ascending ? a.sortDate < b.sortDate : a.sortDate > b.sortDate
-                case "name": return d.ascending ? byName(a, b) : byName(b, a)
-                default: return byName(a, b)
-                }
-            }
-            return s.filter(\.isDirectory) + s.filter { !$0.isDirectory }
+            let d = table?.sortDescriptors.first
+            return items.sorted(by: d?.key.flatMap(FileSortKey.init(rawValue:)) ?? .name, ascending: d?.ascending ?? true)
         }
 
         private func applySelection() {
@@ -264,10 +255,7 @@ struct FileTable: NSViewRepresentable {
         // MARK: Drag out (file promises)
 
         private func promise(for item: FileItem) -> NSFilePromiseProvider {
-            let type: UTType = item.isDirectory
-                ? .folder
-                : UTType(filenameExtension: (item.name as NSString).pathExtension) ?? .data
-            let p = NSFilePromiseProvider(fileType: type.identifier, delegate: self)
+            let p = NSFilePromiseProvider(fileType: item.contentType.identifier, delegate: self)
             p.userInfo = item
             return p
         }
