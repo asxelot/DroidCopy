@@ -62,6 +62,20 @@ struct MainLayout: View {
 
 // MARK: - Device pane
 
+/// Ejects the device; unavailable while copies are running, since ejecting would cut them off.
+struct EjectButton: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var queue: TransferQueue
+
+    var body: some View {
+        Button { Task { await model.eject() } } label: {
+            Label("Eject", systemImage: "eject")
+        }
+        .disabled(queue.hasActive || model.ejecting)
+        .help(queue.hasActive ? "Wait for the copies to finish before ejecting" : "Make the device safe to unplug")
+    }
+}
+
 final class DevicePaneState: ObservableObject {
     @Published var creatingFolder = false
     @Published var renaming: FileItem?
@@ -93,6 +107,9 @@ struct DevicePane: View {
                 }
                 .disabled(model.deviceSelection.isEmpty)
                 .help("Copy the selected items to a folder on your Mac")
+                if model.device != nil {
+                    EjectButton(queue: model.queue)
+                }
             }
             if model.adbMissing {
                 ContentUnavailableView {
@@ -110,9 +127,17 @@ struct DevicePane: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.device == nil {
                 ContentUnavailableView {
-                    Label("No Device", systemImage: "cable.connector.slash")
+                    if model.ejectedSerial != nil {
+                        Label("Ejected", systemImage: "eject")
+                    } else {
+                        Label("No Device", systemImage: "cable.connector.slash")
+                    }
                 } description: {
                     Text(model.deviceStatus)
+                } actions: {
+                    if model.ejectedSerial != nil {
+                        Button("Reconnect") { Task { await model.reconnect() } }
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

@@ -40,6 +40,9 @@ final class AppModel: ObservableObject {
     @Published var deviceError: String?
     @Published var deviceFree: Int64?
     @Published var deviceLoading = false
+    /// The device that was ejected. It isn't reconnected until it's unplugged or the person asks.
+    @Published var ejectedSerial: String?
+    @Published var ejecting = false
 
     @Published var pending: PendingBatch?
     @Published var alertMessage: String?
@@ -76,24 +79,66 @@ final class AppModel: ObservableObject {
             return
         }
         while true {
-            let list = await adb.devices()
-            let ready = list.filter(\.isReady)
-            if let current = device, !ready.contains(where: { $0.serial == current.serial }) {
-                disconnect()
-            }
-            if device == nil {
-                if let first = ready.first {
-                    await connect(first)
-                } else if list.contains(where: { $0.state == "unauthorized" }) {
-                    deviceStatus = "Device found but not authorized.\nUnlock it and tap “Allow” on the USB debugging prompt."
-                } else if list.contains(where: { $0.state == "offline" }) {
-                    deviceStatus = "The device is offline.\nTry unplugging and reconnecting the cable."
-                } else {
-                    deviceStatus = "No device connected.\nConnect your Android device with USB debugging turned on."
-                }
-            }
+            await pollDevices()
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
+    }
+
+    /// One look at what's plugged in: connects the first ready device, notices unplugging.
+    func pollDevices() async {
+        guard let adb else { return }
+        let list = await adb.devices()
+        let ready = list.filter(\.isReady)
+        if let current = device, !ready.contains(where: { $0.serial == current.serial }) {
+            disconnect()
+        }
+        // An ejected device counts as gone until it really is unplugged.
+        if let ejected = ejectedSerial, !list.contains(where: { $0.serial == ejected }) {
+            ejectedSerial = nil
+        }
+        guard device == nil else { return }
+        if let first = ready.first(where: { $0.serial != ejectedSerial }) {
+            await connect(first)
+        } else if ejectedSerial != nil {
+            deviceStatus = "It’s safe to unplug the device."
+        } else if list.contains(where: { $0.state == "unauthorized" }) {
+            deviceStatus = "Device found but not authorized.\nUnlock it and tap “Allow” on the USB debugging prompt."
+        } else if list.contains(where: { $0.state == "offline" }) {
+            deviceStatus = "The device is offline.\nTry unplugging and reconnecting the cable."
+        } else {
+            deviceStatus = "No device connected.\nConnect your Android device with USB debugging turned on."
+        }
+    }
+
+    /// Makes the device safe to unplug: refuses while copies are running, flushes the device's
+    /// writes to storage, then stops using it. `adb` itself is left running for other apps.
+    func eject() async {
+        guard let adb, let d = device, !ejecting else { return }
+        guard !queue.hasActive else {
+            alertMessage = "Wait for the copies to finish, or cancel them, before ejecting."
+            return
+        }
+        ejecting = true
+        defer { ejecting = false }
+        let r = await adb.sync(d.serial)
+        guard r.ok else {
+            alertMessage = "Couldn’t eject “\(d.displayName)”: \(r.message)"
+            return
+        }
+        // A copy may have been started while syncing; keep the device until it's done.
+        guard !queue.hasActive, device?.serial == d.serial else {
+            alertMessage = "Wait for the copies to finish, or cancel them, before ejecting."
+            return
+        }
+        ejectedSerial = d.serial
+        disconnect()
+        deviceStatus = "It’s safe to unplug the device."
+    }
+
+    /// Uses the ejected device again without unplugging it.
+    func reconnect() async {
+        ejectedSerial = nil
+        await pollDevices()
     }
 
     private func connect(_ d: DeviceInfo) async {
@@ -373,7 +418,27 @@ final class AppModel: ObservableObject {
             return Transfer(direction: p.direction, serial: batch.serial, source: p.source, destDir: batch.destDir,
                             name: p.name, isDirectory: p.isDirectory, replace: p.conflict && replace)
         }
+        if transfers.contains(where: { $0.direction == .toDevice }) {
+            arrivals = Set(transfers.map(\.id))
+            arrivalsShown = false
+        }
         queue.add(transfers)
+    }
+
+    /// The latest batch copied to the device. Each item is selected as it lands, so you can see
+    /// what arrived; the first one replaces whatever was selected before.
+    private var arrivals: Set<UUID> = []
+    private var arrivalsShown = false
+
+    private func showArrival(_ t: Transfer) {
+        guard arrivals.contains(t.id), t.destDir == deviceDir else { return }
+        let path = Parse.join(t.destDir, t.name)
+        guard deviceItems.contains(where: { $0.id == path }) else { return }
+        if !arrivalsShown {
+            deviceSelection = []
+            arrivalsShown = true
+        }
+        deviceSelection.insert(path)
     }
 
     private var failedInBatch: [Transfer] = []
@@ -386,7 +451,10 @@ final class AppModel: ObservableObject {
             failedInBatch = []
         }
         if t.direction == .toDevice, t.destDir == deviceDir {
-            Task { await loadDevice() }
+            Task {
+                await loadDevice()
+                if t.state == .done { showArrival(t) }
+            }
         }
     }
 }

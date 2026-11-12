@@ -88,6 +88,12 @@ public final class Adb: @unchecked Sendable {
         await run(["-s", serial, "shell", command])
     }
 
+    /// Flushes the device's write cache to its storage, so nothing written is lost if the device
+    /// is switched off or the card is taken out after unplugging.
+    public func sync(_ serial: String) async -> RunResult {
+        await shell(serial, "sync")
+    }
+
     public func list(_ serial: String, _ dir: String, showHidden: Bool = false) async throws -> [FileItem] {
         let q = Parse.shellQuote(dir)
         let r = await shell(serial, """

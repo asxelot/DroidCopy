@@ -156,6 +156,36 @@ final class Harness {
         #expect(h.model.pending == nil && h.model.alertMessage == nil)
     }
 
+    @Test func copiedFilesAreSelectedWhenTheyLand() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "old.txt"), "old")
+        for name in ["a.txt", "b.txt"] { try writeFile(h.mac.appendingPathComponent(name).path, name) }
+        await h.open()
+        h.model.deviceSelection = [Parse.join(h.dev, "old.txt")]
+
+        #expect(h.model.dropOnDevice(["a.txt", "b.txt"].map { h.mac.appendingPathComponent($0) }))
+        await waitUntil { h.model.queue.items.count == 2 }
+        await h.idle()
+        let both: Set = [Parse.join(h.dev, "a.txt"), Parse.join(h.dev, "b.txt")]
+        await waitUntil { h.model.deviceSelection == both }
+        #expect(h.model.deviceSelection == both, "the new files replace the old selection")
+    }
+
+    @Test func failedCopiesAreNotSelected() async throws {
+        let h = try Harness(push: .fail)
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "old.txt"), "old")
+        try writeFile(h.mac.appendingPathComponent("a.txt").path, "a")
+        await h.open()
+        h.model.deviceSelection = [Parse.join(h.dev, "old.txt")]
+
+        h.model.copyToDevice([h.mac.appendingPathComponent("a.txt")])
+        await waitUntil { h.model.queue.items.count == 1 }
+        await h.idle()
+        #expect(h.model.deviceSelection == [Parse.join(h.dev, "old.txt")])
+    }
+
     @Test func nameClashesAskFirstIncludingHiddenFiles() async throws {
         let h = try Harness()
         defer { h.cleanUp() }
@@ -191,6 +221,60 @@ final class Harness {
         h.model.device = nil
         h.model.copyToDevice([h.mac.appendingPathComponent("x")])
         #expect(h.model.alertMessage == "Connect a device first.")
+    }
+}
+
+@Suite @MainActor struct EjectTests {
+    private func setDevices(_ h: Harness, _ text: String) throws {
+        try text.write(to: h.fake.root.appendingPathComponent("devices.txt"), atomically: true, encoding: .utf8)
+    }
+
+    @Test func ejectedDeviceStaysAwayUntilReconnected() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        await h.open()
+
+        await h.model.eject()
+        #expect(h.model.device == nil && h.model.deviceItems.isEmpty)
+        #expect(h.model.ejectedSerial == "FAKE123")
+        #expect(h.model.alertMessage == nil)
+
+        await h.model.pollDevices()
+        #expect(h.model.device == nil, "still plugged in, but ejected")
+        #expect(h.model.deviceStatus.contains("safe to unplug"))
+
+        await h.model.reconnect()
+        #expect(h.model.device?.serial == "FAKE123")
+        #expect(h.model.ejectedSerial == nil)
+    }
+
+    @Test func unpluggingAnEjectedDeviceForgetsTheEject() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        await h.model.eject()
+
+        try setDevices(h, "List of devices attached\n")
+        await h.model.pollDevices()
+        #expect(h.model.ejectedSerial == nil)
+        #expect(h.model.deviceStatus.contains("No device connected"))
+
+        try setDevices(h, "List of devices attached\nFAKE123  device product:x model:Fake_Phone\n")
+        await h.model.pollDevices()
+        #expect(h.model.device?.serial == "FAKE123", "plugging it back in connects it again")
+    }
+
+    @Test func wontEjectWhileCopying() async throws {
+        let h = try Harness(push: .hang)
+        defer { h.cleanUp() }
+        try writeFile(h.mac.appendingPathComponent("a.txt").path, "abcdef")
+        await h.open()
+        h.model.copyToDevice([h.mac.appendingPathComponent("a.txt")])
+        await waitUntil { h.model.queue.items.first?.state == .running }
+
+        await h.model.eject()
+        #expect(h.model.device != nil && h.model.ejectedSerial == nil)
+        #expect(h.model.alertMessage?.contains("Wait for the copies") == true)
+        await h.model.queue.cancelAllAndWait()
     }
 }
 

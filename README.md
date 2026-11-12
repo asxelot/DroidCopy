@@ -41,7 +41,8 @@ opens internal storage. Double-click a folder to open it, and use the path bar o
 - Drag files or folders from Finder onto the list, or
 - copy them in Finder (⌘C), click the list and paste (⌘V).
 
-They go into the folder being shown.
+They go into the folder being shown, and each item is selected as it arrives, so you can see
+what was copied.
 
 **Copying to the Mac**
 - Drag items from the list into any Finder window or onto the Desktop. Finder asks DroidCopy for
@@ -54,6 +55,12 @@ They go into the folder being shown.
 
 **Other actions:** New Folder, and Rename… and Delete… on the right-click menu. Delete (⌫) also
 works on the selection.
+
+**Ejecting:** click **Eject** before unplugging. It's unavailable while copies are running. It
+tells the device to write everything to storage (`sync`), so nothing is lost if you switch the
+device off or take the card out right after, then stops using the device. The device stays
+ejected until you unplug it or click **Reconnect**. adb itself keeps running, because other apps
+may be using it.
 
 ## How copying stays safe
 

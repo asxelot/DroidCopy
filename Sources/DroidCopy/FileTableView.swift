@@ -115,9 +115,12 @@ struct FileTable: NSViewRepresentable {
             guard let table else { return }
             let wanted = IndexSet(rows.indices.filter { parent.selection.contains(rows[$0].id) })
             guard wanted != table.selectedRowIndexes else { return }
+            let added = wanted.subtracting(table.selectedRowIndexes)
             applyingSelection = true
             table.selectRowIndexes(wanted, byExtendingSelection: false)
             applyingSelection = false
+            // Bring rows the app selected (like newly copied files) into view.
+            if let row = added.last { table.scrollRowToVisible(row) }
         }
 
         var selectedItems: [FileItem] {
