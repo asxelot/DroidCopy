@@ -507,3 +507,37 @@ final class Harness {
         #expect(!h.model.deviceLoading)
     }
 }
+
+@Suite @MainActor struct TransferPanelTests {
+    /// The height the panel takes for `count` transfers (one copying, held open; the rest waiting)
+    /// when offered `room` points, as MainLayout offers it half the window.
+    private func panelHeight(_ count: Int, room: CGFloat = 400) async throws -> CGFloat {
+        let fake = try FakeAdb(push: .hang)
+        defer { fake.cleanUp() }
+        let dev = try fake.deviceDir()
+        let mac = try fake.macDir()
+        let queue = TransferQueue(adb: fake.adb)
+        let transfers = try (0..<count).map { i -> Transfer in
+            let src = mac.appendingPathComponent("file\(i).bin")
+            try writeFile(src.path, "data")
+            return Transfer(direction: .toDevice, serial: "FAKE123", source: src.path, destDir: dev,
+                            name: "file\(i).bin", isDirectory: false, replace: false)
+        }
+        queue.add(transfers)
+        await waitUntil { transfers[0].state == .running }
+        let host = NSHostingController(rootView: TransferList(queue: queue))
+        let height = host.sizeThatFits(in: CGSize(width: 700, height: room)).height
+        await queue.cancelAllAndWait()
+        return height
+    }
+
+    @Test func growsWithItsRowsUpToTheRoomGiven() async throws {
+        let one = try await panelHeight(1)
+        let two = try await panelHeight(2)
+        let many = try await panelHeight(12)
+        #expect(one > 60 && one < 140, "one row plus the header, not a fixed block: \(one)")
+        #expect(two > one + 20, "a second row makes it taller: \(one) → \(two)")
+        #expect(abs(many - 400) < 1, "twelve rows fill the room and scroll: \(many)")
+        #expect(abs(try await panelHeight(12, room: 250) - 250) < 1, "a smaller window gives a smaller panel")
+    }
+}

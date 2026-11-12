@@ -46,16 +46,19 @@ struct ContentView: View {
 /// failed items wait to be retried or cleared.
 struct MainLayout: View {
     @ObservedObject var queue: TransferQueue
+    static let transferShare: CGFloat = 0.5
 
     var body: some View {
-        if queue.showsProgress || queue.failedCount > 0 {
-            VSplitView {
-                DevicePane().frame(minHeight: 280, maxHeight: .infinity)
-                TransferList(queue: queue)
-                    .frame(minHeight: 120, idealHeight: 200, maxHeight: .infinity)
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                DevicePane().frame(maxHeight: .infinity)
+                if queue.showsProgress || queue.failedCount > 0 {
+                    Divider()
+                    // As tall as its rows, but never more than half the window.
+                    TransferList(queue: queue)
+                        .frame(maxHeight: geo.size.height * Self.transferShare)
+                }
             }
-        } else {
-            DevicePane()
         }
     }
 }
@@ -266,15 +269,21 @@ struct TransferList: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             Divider()
-            if queue.items.isEmpty {
-                Text("Drop files from Finder onto the device to copy them.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List {
-                    ForEach(queue.items) { TransferRow(transfer: $0, queue: queue) }
-                }
-                .listStyle(.inset)
+            // As tall as its rows when they fit in the space offered; otherwise the rows scroll.
+            ViewThatFits(in: .vertical) {
+                rows
+                ScrollView { rows }
+            }
+        }
+    }
+
+    private var rows: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(queue.items.enumerated()), id: \.element.id) { i, t in
+                if i > 0 { Divider().padding(.leading, 44) }
+                TransferRow(transfer: t, queue: queue)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
             }
         }
     }
