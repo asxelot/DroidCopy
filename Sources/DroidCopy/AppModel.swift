@@ -44,6 +44,16 @@ final class AppModel: ObservableObject {
     @Published var ejectedSerial: String?
     @Published var ejecting = false
 
+    /// The delete in progress: which item, and where it is in the batch. `rm` reports nothing
+    /// while it runs, and a big file on an SD card can take a while, so the UI shows this.
+    struct DeleteProgress: Equatable {
+        let name: String
+        let index: Int
+        let count: Int
+        let started: Date
+    }
+    @Published var deleteProgress: DeleteProgress?
+
     @Published var pending: PendingBatch?
     @Published var alertMessage: String?
 
@@ -116,6 +126,10 @@ final class AppModel: ObservableObject {
         guard let adb, let d = device, !ejecting else { return }
         guard !queue.hasActive else {
             alertMessage = "Wait for the copies to finish, or cancel them, before ejecting."
+            return
+        }
+        guard deleteProgress == nil else {
+            alertMessage = "Wait for the delete to finish before ejecting."
             return
         }
         ejecting = true
@@ -248,8 +262,10 @@ final class AppModel: ObservableObject {
     }
 
     func delete(_ items: [FileItem]) async {
-        guard let adb, let d = device else { return }
-        for item in items {
+        guard let adb, let d = device, deleteProgress == nil, !items.isEmpty else { return }
+        defer { deleteProgress = nil }
+        for (i, item) in items.enumerated() {
+            deleteProgress = DeleteProgress(name: item.name, index: i + 1, count: items.count, started: Date())
             let r = await adb.delete(d.serial, item.path)
             if !r.ok {
                 alertMessage = "Couldn’t delete “\(item.name)”: \(r.message)"

@@ -74,7 +74,7 @@ struct EjectButton: View {
         Button { Task { await model.eject() } } label: {
             Label("Eject", systemImage: "eject")
         }
-        .disabled(queue.hasActive || model.ejecting)
+        .disabled(queue.hasActive || model.ejecting || model.deleteProgress != nil)
         .help(queue.hasActive ? "Wait for the copies to finish before ejecting" : "Make the device safe to unplug")
     }
 }
@@ -163,7 +163,9 @@ struct DevicePane: View {
                     }
                 }
                 .overlay(alignment: .bottom) {
-                    if !model.deviceLoading && model.deviceError == nil {
+                    if let progress = model.deleteProgress {
+                        DeleteStatus(progress: progress)
+                    } else if !model.deviceLoading && model.deviceError == nil {
                         Text("Drag or paste files from Finder to copy them here · drag or copy items out to Finder")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -195,6 +197,42 @@ struct DevicePane: View {
         } message: {
             Text("This can’t be undone.")
         }
+    }
+}
+
+/// "Deleting “x” · 2 of 5 · 14 s" with a bar for batches, over the bottom of the file list.
+struct DeleteStatus: View {
+    let progress: AppModel.DeleteProgress
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Deleting “\(progress.name)”").lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 8)
+                // Ticks every second, so a slow delete visibly hasn't stalled.
+                TimelineView(.periodic(from: progress.started, by: 1)) { context in
+                    Text(detail(at: context.date)).foregroundStyle(.secondary).monospacedDigit()
+                }
+            }
+            if progress.count > 1 {
+                ProgressView(value: Double(progress.index - 1), total: Double(progress.count)).progressViewStyle(.linear)
+            }
+        }
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: 520)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.1)))
+        .padding(10)
+    }
+
+    private func detail(at now: Date) -> String {
+        let seconds = Int(now.timeIntervalSince(progress.started))
+        let elapsed = seconds >= 2 ? Fmt.duration(Double(seconds)) : ""
+        let position = progress.count > 1 ? "\(progress.index) of \(progress.count)" : ""
+        return [position, elapsed].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 

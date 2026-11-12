@@ -119,6 +119,41 @@ final class Harness {
         #expect(h.model.deviceItems.isEmpty)
     }
 
+    @Test func deletingReportsEachItemThenClears() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        for name in ["a.bin", "b.bin", "c.bin"] { try writeFile(Parse.join(h.dev, name), "x") }
+        await h.open()
+        var seen: [AppModel.DeleteProgress?] = []
+        let watch = h.model.$deleteProgress.sink { seen.append($0) }
+        defer { watch.cancel() }
+
+        await h.model.delete(["a.bin", "b.bin", "c.bin"].compactMap(h.item))
+        let shown = seen.compactMap { $0 }
+        #expect(shown.map(\.name) == ["a.bin", "b.bin", "c.bin"])
+        #expect(shown.map(\.index) == [1, 2, 3] && shown.allSatisfy { $0.count == 3 })
+        #expect(h.model.deleteProgress == nil)
+        #expect(h.model.deviceItems.isEmpty)
+    }
+
+    @Test func wontEjectWhileDeleting() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        // A slow rm on the "device", like a big file on an SD card.
+        try writeFile(h.fake.root.appendingPathComponent("bin/rm").path, "#!/bin/sh\nsleep 2\nexec /bin/rm \"$@\"\n")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: h.fake.root.appendingPathComponent("bin/rm").path)
+        try writeFile(Parse.join(h.dev, "big.iso"), "x")
+        await h.open()
+
+        let deleting = Task { await h.model.delete([h.item("big.iso")!]) }
+        await waitUntil { h.model.deleteProgress != nil }
+        await h.model.eject()
+        #expect(h.model.device != nil && h.model.ejectedSerial == nil)
+        #expect(h.model.alertMessage == "Wait for the delete to finish before ejecting.")
+        await deleting.value
+        #expect(h.model.deleteProgress == nil && h.item("big.iso") == nil)
+    }
+
     @Test func rejectsInvalidNames() async throws {
         let h = try Harness()
         defer { h.cleanUp() }
