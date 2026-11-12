@@ -60,17 +60,13 @@ struct MainLayout: View {
     }
 }
 
-let defaultSortOrder = [KeyPathComparator(\FileItem.name, comparator: .localizedStandard)]
-
 // MARK: - Device pane
 
 final class DevicePaneState: ObservableObject {
-    @Published var dropTargeted = false
     @Published var creatingFolder = false
     @Published var renaming: FileItem?
     @Published var deleting: [FileItem] = []
     @Published var newName = ""
-    @Published var sortOrder = defaultSortOrder
 }
 
 struct DevicePane: View {
@@ -126,17 +122,16 @@ struct DevicePane: View {
                 FileTable(
                     items: model.deviceItems,
                     selection: $model.deviceSelection,
-                    sortOrder: $ui.sortOrder,
-                    open: model.openDevice
-                ) { ids in
-                    let items = model.deviceItems.filter { ids.contains($0.id) }
-                    Button("Copy to Mac…") { model.copyToMac(items) }
-                    if items.count == 1, let item = items.first {
-                        Button("Rename…") { ui.newName = item.name; ui.renaming = item }
-                    }
-                    Divider()
-                    Button("Delete…", role: .destructive) { ui.deleting = items }
-                }
+                    actions: FileTableActions(
+                        open: model.openDevice,
+                        copyToMac: model.copyToMac,
+                        copy: model.copyToClipboard,
+                        rename: { item in ui.newName = item.name; ui.renaming = item },
+                        delete: { items in ui.deleting = items },
+                        receive: { urls in _ = model.dropOnDevice(urls) },
+                        deliver: model.deliver
+                    )
+                )
                 .overlay {
                     if let error = model.deviceError {
                         ContentUnavailableView("Can’t open this folder", systemImage: "exclamationmark.triangle", description: Text(error))
@@ -144,22 +139,14 @@ struct DevicePane: View {
                         ProgressView()
                     }
                 }
-                .dropHighlight(ui.dropTargeted)
-                .dropDestination(for: URL.self) { urls, _ in
-                    model.dropOnDevice(urls)
-                } isTargeted: { ui.dropTargeted = $0 }
                 .overlay(alignment: .bottom) {
                     if !model.deviceLoading && model.deviceError == nil {
-                        Text("Drop files from Finder to copy them here")
+                        Text("Drag or paste files from Finder to copy them here · drag or copy items out to Finder")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(6)
                             .allowsHitTesting(false)
                     }
-                }
-                .onDeleteCommand {
-                    let items = model.deviceItems.filter { model.deviceSelection.contains($0.id) }
-                    if !items.isEmpty { ui.deleting = items }
                 }
             }
         }
@@ -242,61 +229,6 @@ struct NavBar: View {
     }
 }
 
-struct FileTable<MenuContent: View>: View {
-    let items: [FileItem]
-    @Binding var selection: Set<String>
-    @Binding var sortOrder: [KeyPathComparator<FileItem>]
-    let open: (FileItem) -> Void
-    @ViewBuilder let menu: (Set<String>) -> MenuContent
-
-    /// Column sort, with folders kept above files.
-    private var sortedItems: [FileItem] {
-        let sorted = items.sorted(using: sortOrder)
-        return sorted.filter(\.isDirectory) + sorted.filter { !$0.isDirectory }
-    }
-
-    var body: some View {
-        Table(of: FileItem.self, selection: $selection, sortOrder: $sortOrder) {
-            TableColumn("Name", value: \.name, comparator: .localizedStandard) { item in
-                HStack(spacing: 6) {
-                    Image(systemName: item.isDirectory ? "folder.fill" : "doc")
-                        .foregroundStyle(item.isDirectory ? Color.accentColor : Color.secondary)
-                        .frame(width: 16)
-                    Text(item.name).lineLimit(1).truncationMode(.middle)
-                }
-            }
-            TableColumn("Size", value: \.size) { item in
-                Text(item.isDirectory ? "--" : Fmt.bytes(item.size))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            .width(min: 60, ideal: 85, max: 120)
-            TableColumn("Modified", value: \.sortDate) { item in
-                Text(item.modified.map(Fmt.date) ?? "").foregroundStyle(.secondary)
-            }
-            .width(min: 80, ideal: 130, max: 170)
-        } rows: {
-            ForEach(sortedItems) { TableRow($0) }
-        }
-        .contextMenu(forSelectionType: String.self, menu: menu) { ids in
-            guard ids.count == 1, let id = ids.first, let item = items.first(where: { $0.id == id }) else { return }
-            open(item)
-        }
-    }
-}
-
-extension View {
-    func dropHighlight(_ on: Bool) -> some View {
-        overlay {
-            if on {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.accentColor, lineWidth: 3)
-                    .padding(2)
-                    .allowsHitTesting(false)
-            }
-        }
-    }
-}
 
 // MARK: - Transfers
 
@@ -340,7 +272,7 @@ struct TransferRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(transfer.name).lineLimit(1).truncationMode(.middle)
-                    Text("→ \(transfer.direction == .toDevice ? "device" : "Mac"): \(transfer.destDir)")
+                    Text(transfer.destLabel.map { "→ \($0)" } ?? "→ \(transfer.direction == .toDevice ? "device" : "Mac"): \(transfer.destDir)")
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.head)

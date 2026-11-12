@@ -1,0 +1,99 @@
+# DroidCopy
+
+A small Mac app for copying files to and from an Android device over USB. It uses `adb push`
+and `adb pull`, so it doesn't depend on MTP, which tends to stall or drop large files (the kind
+of thing OpenMTP and Android File Transfer struggle with). It was built for moving game files to
+a Retroid Pocket 5, but works with any Android device that has USB debugging on.
+
+## What you need
+
+- macOS 14 or later.
+- `adb`. The easiest way to get it is [Homebrew](https://brew.sh):
+
+  ```sh
+  brew install android-platform-tools
+  ```
+
+  DroidCopy looks for it in `/opt/homebrew/bin`, `/usr/local/bin` and
+  `~/Library/Android/sdk/platform-tools`. If yours is somewhere else, start the app with
+  `DROIDCOPY_ADB=/path/to/adb`. If adb isn't found, the window shows the install command with a
+  copy button.
+- USB debugging turned on on the device, and the "Allow USB debugging" prompt accepted.
+
+## Building and installing
+
+Only the Xcode Command Line Tools are needed; full Xcode isn't.
+
+```sh
+./build-app.sh                      # builds build/DroidCopy.app (ad-hoc signed)
+mv build/DroidCopy.app /Applications/
+```
+
+Each build has a new ad-hoc signature, so macOS may ask again for access to folders like
+Downloads after you install a new build.
+
+## Using it
+
+The window shows the connected device. If there is an SD card, it opens there; otherwise it
+opens internal storage. Double-click a folder to open it, and use the path bar or ↑ to go back.
+
+**Copying to the device**
+- Drag files or folders from Finder onto the list, or
+- copy them in Finder (⌘C), click the list and paste (⌘V).
+
+They go into the folder being shown.
+
+**Copying to the Mac**
+- Drag items from the list into any Finder window or onto the Desktop. Finder asks DroidCopy for
+  each item, and it is pulled straight to where you dropped it.
+- Select items and press ⌘C, then paste in Finder. Finder can only paste files that already
+  exist on the Mac, so ⌘C first pulls the items into `~/Library/Caches/DroidCopy/Clipboard`
+  (you'll see the progress) and puts them on the clipboard when they're done. For very large
+  files, dragging or **Copy to Mac…** is better because they don't make that extra copy.
+- **Copy to Mac…** (toolbar or right-click) asks for a folder and copies there.
+
+**Other actions:** New Folder, and Rename… and Delete… on the right-click menu. Delete (⌫) also
+works on the selection.
+
+## How copying stays safe
+
+- **Existing items:** if something with the same name already exists, you're asked whether to
+  replace it or skip it. Nothing is overwritten without asking.
+- **Hidden name until verified:** each copy is written under a hidden name (`.dc~<name>`), its
+  size is checked against the source, and only then is it renamed into place. A cancelled or
+  failed copy never leaves a half-written file under the real name.
+- **Replacing:** the old item is kept until the new copy has been verified. The one exception is
+  when the new copy only fits because the old one is deleted; then the old one is deleted first.
+- **Free space** is checked before anything is copied or deleted.
+- **One at a time:** transfers run in order and can be cancelled or retried from the transfer
+  list. Failures stay listed until you retry or clear them, and you get one alert per batch.
+
+## Development
+
+```sh
+swift build
+swift test
+```
+
+The unit tests don't need a device. `Tests/DroidCopyCoreTests/FakeAdb.swift` is a stand-in
+`adb` that runs "device" commands against a temporary folder on the Mac, so listing, copying,
+replacing, free space, cancelling and failures are all tested end to end.
+
+The device tests copy real files to `/storage/emulated/0/Download/droidcopy-test` and remove
+them afterwards. They run only when you name a device:
+
+```sh
+DROIDCOPY_DEVICE=<serial from `adb devices`> swift test --filter DeviceIntegrationTests
+```
+
+**Layout**
+- `Sources/DroidCopyCore`: adb commands, output parsing and the transfer queue. No UI; everything
+  here is tested.
+- `Sources/DroidCopy`: the SwiftUI app. `FileTableView.swift` is an AppKit table, because
+  SwiftUI's `Table` can't drag files out to Finder (its drags carry only text).
+
+**Known quirks with the Command Line Tools**
+- `swift test` sometimes fails to build with "plugin for module 'TestingMacros' not found". Run
+  it again, or run `swift package clean` first.
+- SwiftUI's `@State` is a macro whose plugin the Command Line Tools don't include, so views use
+  `@StateObject` with small `ObservableObject`s instead.

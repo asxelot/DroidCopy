@@ -38,6 +38,10 @@ public final class Transfer: ObservableObject, Identifiable {
     public var finishedAt: Date?
     public var process: Process?
     public var cancelRequested = false
+    /// Shown instead of the destination folder, e.g. "Clipboard".
+    public var destLabel: String?
+    /// Called once when the transfer ends in any way (done, failed or cancelled).
+    public var onComplete: ((Transfer) -> Void)?
 
     public init(direction: Direction, serial: String, source: String, destDir: String, name: String, isDirectory: Bool, replace: Bool) {
         self.direction = direction
@@ -170,6 +174,9 @@ public final class TransferQueue: ObservableObject {
         t.bytesPerSecond = 0
         t.process = nil
         updateActive()
+        let done = t.onComplete
+        t.onComplete = nil
+        done?(t)
     }
 
     private func execute(_ t: Transfer) async {

@@ -392,3 +392,31 @@ import Testing
         #expect(many.contains("…and 2 more"))
     }
 }
+
+@Suite @MainActor struct TransferCompletionTests {
+    @Test func onCompleteFiresOnceForEveryOutcome() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dev = try fake.deviceDir()
+        try writeFile(Parse.join(dev, "a.txt"), "abc")
+        let mac = try fake.macDir()
+
+        func make(_ source: String) -> Transfer {
+            Transfer(direction: .toMac, serial: "FAKE123", source: source, destDir: mac.path,
+                     name: (source as NSString).lastPathComponent, isDirectory: false, replace: false)
+        }
+        let ok = make(Parse.join(dev, "a.txt"))
+        let missing = make(Parse.join(dev, "missing.txt"))
+        let cancelled = make(Parse.join(dev, "a.txt"))
+        var calls: [UUID: Int] = [:]
+        for t in [ok, missing, cancelled] { t.onComplete = { calls[$0.id, default: 0] += 1 } }
+
+        let q = TransferQueue(adb: fake.adb)
+        q.add([ok, missing, cancelled])
+        q.cancel(cancelled)
+        await waitIdle(q)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        #expect(ok.state == .done && missing.state.isFailed && cancelled.state == .cancelled)
+        #expect(calls == [ok.id: 1, missing.id: 1, cancelled.id: 1])
+    }
+}

@@ -56,6 +56,7 @@ final class AppModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        removeStaleClipboardCopies()
         Task { await monitorDevices() }
     }
 
@@ -253,6 +254,91 @@ final class AppModel: ObservableObject {
                  conflict: FileManager.default.fileExists(atPath: dir.appendingPathComponent(item.name).path))
         }
         submit(PendingBatch(plans: plans, serial: d.serial, destDir: dir.path))
+    }
+
+    /// Fulfils a Finder drop or paste: pulls `item` to exactly `url`, through the queue so it gets
+    /// progress, a size check and the usual safety. `done` gets nil on success.
+    func deliver(_ item: FileItem, to url: URL, done: @escaping (Error?) -> Void) {
+        guard let d = device else {
+            done(AdbError("The device isn’t connected."))
+            return
+        }
+        let t = Transfer(direction: .toMac, serial: d.serial, source: item.path,
+                         destDir: url.deletingLastPathComponent().path, name: url.lastPathComponent,
+                         isDirectory: item.isDirectory, replace: false)
+        t.onComplete = { t in
+            switch t.state {
+            case .done: done(nil)
+            case .failed(let message): done(AdbError(message))
+            default: done(CocoaError(.userCancelled))
+            }
+        }
+        queue.add([t])
+    }
+
+    // MARK: Clipboard
+
+    /// Finder only pastes real files, and something (clipboard history) reads the clipboard as soon
+    /// as it changes, so a lazy promise wouldn't stay lazy. Instead ⌘C pulls the items into a cache
+    /// folder (with progress in the transfer list) and then puts those files on the clipboard.
+    private static let clipboardCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("DroidCopy/Clipboard")
+    private var clipboardCopy: (token: UUID, dir: URL, transfers: [Transfer])?
+
+    func copyToClipboard(_ items: [FileItem]) {
+        guard let d = device, !items.isEmpty else { return }
+        let fm = FileManager.default
+
+        // Drop the previous clipboard copy: cancel it if still running, else delete its files.
+        if let previous = clipboardCopy {
+            let running = previous.transfers.filter { !$0.state.isFinished }
+            if running.isEmpty { try? fm.removeItem(at: previous.dir) } else { running.forEach(queue.cancel) }
+        }
+
+        let token = UUID()
+        let dir = Self.clipboardCache.appendingPathComponent(token.uuidString)
+        do { try fm.createDirectory(at: dir, withIntermediateDirectories: true) } catch {
+            alertMessage = "Couldn’t prepare the copy: \(error.localizedDescription)"
+            return
+        }
+        // Nothing stale gets pasted while the files are on their way.
+        NSPasteboard.general.clearContents()
+
+        let transfers = items.map { item -> Transfer in
+            let t = Transfer(direction: .toMac, serial: d.serial, source: item.path, destDir: dir.path,
+                             name: item.name, isDirectory: item.isDirectory, replace: false)
+            t.destLabel = "Clipboard"
+            t.onComplete = { [weak self] _ in self?.clipboardTransferFinished(token) }
+            return t
+        }
+        clipboardCopy = (token, dir, transfers)
+        queue.add(transfers)
+    }
+
+    private func clipboardTransferFinished(_ token: UUID) {
+        guard let copy = clipboardCopy else { return }
+        if copy.token != token {
+            // A newer ⌘C replaced it. Once none of the replaced copies is still running, remove them.
+            let olderRunning = queue.items.contains {
+                $0.destLabel == "Clipboard" && !$0.state.isFinished && $0.destDir != copy.dir.path
+            }
+            if !olderRunning { removeStaleClipboardCopies() }
+            return
+        }
+        guard copy.transfers.allSatisfy(\.state.isFinished) else { return }
+        let urls = copy.transfers.filter { $0.state == .done }.map { URL(fileURLWithPath: $0.destPath) }
+        guard !urls.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects(urls as [NSURL])
+    }
+
+    /// Clipboard copies left over from earlier runs, except the current one.
+    func removeStaleClipboardCopies() {
+        let fm = FileManager.default
+        let keep = clipboardCopy?.dir.lastPathComponent
+        for name in (try? fm.contentsOfDirectory(atPath: Self.clipboardCache.path)) ?? [] where name != keep {
+            try? fm.removeItem(at: Self.clipboardCache.appendingPathComponent(name))
+        }
     }
 
     func copySelectedToMac() {
