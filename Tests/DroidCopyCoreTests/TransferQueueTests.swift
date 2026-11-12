@@ -200,7 +200,7 @@ import Testing
         let running = upload(first, to: dev)
         let waiting = upload(second, to: dev)
         q.add([running, waiting])
-        await waitUntil { running.process != nil && FileManager.default.fileExists(atPath: Parse.join(dev, "first.bin")) }
+        await waitUntil { running.process != nil && FileManager.default.fileExists(atPath: running.stagingPath) }
         #expect(running.state == .running)
         #expect(q.activeCount == 2)
 
@@ -209,8 +209,7 @@ import Testing
         q.cancel(running)
         await waitIdle(q)
         #expect(running.state == .cancelled)
-        #expect(!FileManager.default.fileExists(atPath: Parse.join(dev, "first.bin")))
-        #expect(!FileManager.default.fileExists(atPath: Parse.join(dev, "second.bin")))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dev).isEmpty, "no partial or hidden leftovers")
     }
 
     @Test func cancelAllAndWaitLeavesNothingBehind() async throws {
@@ -230,31 +229,166 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: mac.appendingPathComponent("a.bin").path))
     }
 
-    @Test func retryAndClearFinished() async throws {
+    @Test func failuresStayListedAndRetryReplacesThemInPlace() async throws {
         let fake = try FakeAdb()
         defer { fake.cleanUp() }
-        let src = try fake.macDir().appendingPathComponent("a.txt")
-        try writeFile(src.path, "new")
+        let mac = try fake.macDir()
         let dev = try fake.deviceDir()
+        let src = mac.appendingPathComponent("a.txt")
+        try writeFile(src.path, "new")
         try writeFile(Parse.join(dev, "a.txt"), "old")
 
         let q = TransferQueue(adb: fake.adb)
-        let t = upload(src, to: dev)
-        q.add([t])
+        let failed = upload(src, to: dev)
+        q.add([failed])
         await waitIdle(q)
-        #expect(t.state.isFinished)
-        #expect(q.items.count == 1)
+        #expect(failed.state.isFailed)
+        #expect(q.failedCount == 1 && q.activeCount == 0)
+
+        // A new batch drops finished items but keeps the failure.
+        let other = mac.appendingPathComponent("b.txt")
+        try writeFile(other.path, "b")
+        let ok = upload(other, to: dev)
+        q.add([ok])
+        await waitIdle(q)
+        #expect(q.items.map(\.id) == [failed.id, ok.id])
 
         try FileManager.default.removeItem(atPath: Parse.join(dev, "a.txt"))
-        q.retry(t)
+        q.retry(failed)
+        #expect(q.items[0].id != failed.id, "the retry takes the failed item's place")
         await waitIdle(q)
-        // A new batch after the queue went idle starts with a clean list.
-        #expect(q.items.count == 1)
-        #expect(q.items[0].id != t.id)
+        #expect(q.items.count == 2)
         #expect(q.items[0].state == .done)
+        #expect(q.failedCount == 0)
         #expect(readFile(Parse.join(dev, "a.txt")) == "new")
 
         q.clearFinished()
         #expect(q.items.isEmpty)
+    }
+
+    @Test func cancelBeforeItsTurnStartsNeverCopies() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let src = try fake.macDir().appendingPathComponent("a.txt")
+        try writeFile(src.path, "abc")
+        let dev = try fake.deviceDir()
+
+        let q = TransferQueue(adb: fake.adb)
+        let t = upload(src, to: dev)
+        q.add([t])     // schedules the copy...
+        q.cancel(t)    // ...and cancels it before the scheduled task runs.
+        await waitIdle(q)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        #expect(t.state == .cancelled)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dev).isEmpty)
+    }
+
+    @Test func failedReplaceKeepsTheOriginalOnDevice() async throws {
+        let fake = try FakeAdb(push: .fail)
+        defer { fake.cleanUp() }
+        let src = try fake.macDir().appendingPathComponent("game.nsp")
+        try writeFile(src.path, "new version")
+        let dev = try fake.deviceDir()
+        try writeFile(Parse.join(dev, "game.nsp"), "old version")
+
+        let t = upload(src, to: dev, replace: true)
+        _ = await run(fake, [t])
+        #expect(t.state.isFailed)
+        #expect(readFile(Parse.join(dev, "game.nsp")) == "old version")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dev) == ["game.nsp"])
+    }
+
+    @Test func failedReplaceKeepsTheOriginalOnMac() async throws {
+        let fake = try FakeAdb(pull: .truncate)
+        defer { fake.cleanUp() }
+        let dev = try fake.deviceDir()
+        try writeFile(Parse.join(dev, "a.txt"), "device version")
+        let mac = try fake.macDir()
+        try writeFile(mac.appendingPathComponent("a.txt").path, "mac version")
+
+        let t = download(Parse.join(dev, "a.txt"), to: mac, replace: true)
+        _ = await run(fake, [t])
+        #expect(t.state.isFailed)
+        #expect(readFile(mac.appendingPathComponent("a.txt").path) == "mac version")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: mac.path) == ["a.txt"])
+    }
+
+    @Test func cancelledReplaceKeepsTheOriginal() async throws {
+        let fake = try FakeAdb(push: .hang)
+        defer { fake.cleanUp() }
+        let src = try fake.macDir().appendingPathComponent("a.bin")
+        try writeFile(src.path, "0123456789")
+        let dev = try fake.deviceDir()
+        try writeFile(Parse.join(dev, "a.bin"), "original")
+
+        let q = TransferQueue(adb: fake.adb)
+        let t = upload(src, to: dev, replace: true)
+        q.add([t])
+        await waitUntil { t.process != nil }
+        q.cancel(t)
+        await waitIdle(q)
+        #expect(t.state == .cancelled)
+        #expect(readFile(Parse.join(dev, "a.bin")) == "original")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dev) == ["a.bin"])
+    }
+
+    @Test func replacesFolderOnMacWithoutLeftovers() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dev = try fake.deviceDir()
+        try FileManager.default.createDirectory(atPath: Parse.join(dev, "Saves"), withIntermediateDirectories: false)
+        try writeFile(Parse.join(dev, "Saves/new.sav"), "n")
+        let mac = try fake.macDir()
+        let old = mac.appendingPathComponent("Saves")
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: false)
+        try writeFile(old.appendingPathComponent("old.sav").path, "o")
+
+        let t = download(Parse.join(dev, "Saves"), to: mac, isDirectory: true, replace: true)
+        _ = await run(fake, [t])
+        #expect(t.state == .done)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: old.path) == ["new.sav"])
+        #expect(try FileManager.default.contentsOfDirectory(atPath: mac.path) == ["Saves"])
+    }
+
+    @Test func copiesThroughSymlinksBothWays() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let mac = try fake.macDir()
+        let dev = try fake.deviceDir()
+        let payload = String(repeating: "z", count: 5000)
+
+        try writeFile(mac.appendingPathComponent("real.bin").path, payload)
+        let macLink = mac.appendingPathComponent("link.bin")
+        try FileManager.default.createSymbolicLink(atPath: macLink.path, withDestinationPath: "real.bin")
+        let up = upload(macLink, to: dev)
+
+        try writeFile(Parse.join(dev, "target.bin"), payload)
+        try FileManager.default.createSymbolicLink(atPath: Parse.join(dev, "devlink.bin"), withDestinationPath: "target.bin")
+        let down = download(Parse.join(dev, "devlink.bin"), to: mac)
+
+        _ = await run(fake, [up, down])
+        #expect(up.state == .done)
+        #expect(down.state == .done)
+        #expect(readFile(Parse.join(dev, "link.bin")) == payload)
+        #expect(readFile(mac.appendingPathComponent("devlink.bin").path) == payload)
+    }
+
+    @Test func failureSummary() {
+        func failed(_ name: String, _ message: String) -> Transfer {
+            let t = Transfer(direction: .toDevice, serial: serial, source: "/" + name, destDir: "/d", name: name, isDirectory: false, replace: false)
+            t.state = .failed(message)
+            return t
+        }
+        let done = Transfer(direction: .toDevice, serial: serial, source: "/ok", destDir: "/d", name: "ok", isDirectory: false, replace: false)
+        done.state = .done
+
+        #expect(TransferQueue.failureSummary([done]) == nil)
+        #expect(TransferQueue.failureSummary([done, failed("a", "boom")]) == "Couldn’t copy “a”.\n\nboom")
+
+        let many = TransferQueue.failureSummary((1...7).map { failed("f\($0)", "no space") })!
+        #expect(many.hasPrefix("7 items couldn’t be copied."))
+        #expect(many.contains("“f5”: no space"))
+        #expect(!many.contains("“f6”"))
+        #expect(many.contains("…and 2 more"))
     }
 }

@@ -17,7 +17,9 @@ public enum LocalFS {
     }
 
     /// Bytes in a file, or the total of all files inside a folder. 0 if missing.
+    /// Follows a symlink at `url`, like adb push does.
     public static func size(_ url: URL) -> Int64 {
+        let url = url.resolvingSymlinksInPath()
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }
         if !isDir.boolValue {

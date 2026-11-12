@@ -29,5 +29,5 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --sign - "$APP" >/dev/null 2>&1
+codesign --force --sign - "$APP" >/dev/null || { echo "codesign failed (see above)" >&2; exit 1; }
 echo "Built $(pwd)/$APP"

@@ -12,6 +12,11 @@ public final class Transfer: ObservableObject, Identifiable {
             case .waiting, .running: return false
             }
         }
+        public var failure: String? {
+            if case .failed(let message) = self { return message }
+            return nil
+        }
+        public var isFailed: Bool { failure != nil }
     }
 
     public let id = UUID()
@@ -44,10 +49,19 @@ public final class Transfer: ObservableObject, Identifiable {
         self.replace = replace
     }
 
-    public var destPath: String {
+    public var destPath: String { inDestDir(name) }
+
+    /// Hidden name the copy is written under until it is verified, so a failed or cancelled copy
+    /// never takes the real name.
+    public var stagingPath: String { inDestDir(".dc~" + name) }
+
+    /// Where a replaced item waits while the new copy is moved into place.
+    public var asidePath: String { inDestDir(".dc-old~" + name) }
+
+    private func inDestDir(_ file: String) -> String {
         direction == .toDevice
-            ? Parse.join(destDir, name)
-            : URL(fileURLWithPath: destDir).appendingPathComponent(name).path
+            ? Parse.join(destDir, file)
+            : URL(fileURLWithPath: destDir).appendingPathComponent(file).path
     }
 
     public var fraction: Double {
@@ -63,8 +77,10 @@ public final class Transfer: ObservableObject, Identifiable {
 @MainActor
 public final class TransferQueue: ObservableObject {
     @Published public private(set) var items: [Transfer] = []
-    /// Transfers waiting or running. The UI hides the list when this is 0.
+    /// Transfers waiting or running.
     @Published public private(set) var activeCount = 0
+    /// Failed transfers still in the list. The UI shows the list while this or `activeCount` is above 0.
+    @Published public private(set) var failedCount = 0
     public var onFinished: ((Transfer) -> Void)?
 
     private let adb: Adb
@@ -76,8 +92,9 @@ public final class TransferQueue: ObservableObject {
 
     public func add(_ transfers: [Transfer]) {
         guard !transfers.isEmpty else { return }
-        // A new batch after the queue went idle starts with a clean list.
-        if activeCount == 0 { items.removeAll() }
+        // A new batch after the queue went idle drops the finished items, but failures stay until
+        // they are retried or cleared.
+        if activeCount == 0 { items.removeAll { $0.state.isFinished && !$0.state.isFailed } }
         items.append(contentsOf: transfers)
         updateActive()
         pump()
@@ -85,6 +102,17 @@ public final class TransferQueue: ObservableObject {
 
     private func updateActive() {
         activeCount = items.filter { !$0.state.isFinished }.count
+        failedCount = items.filter(\.state.isFailed).count
+    }
+
+    /// One alert's worth of text about failed transfers, or nil if none failed.
+    public static func failureSummary(_ transfers: [Transfer]) -> String? {
+        let failed = transfers.compactMap { t in t.state.failure.map { (name: t.name, message: $0) } }
+        guard let first = failed.first else { return nil }
+        if failed.count == 1 { return "Couldn’t copy “\(first.name)”.\n\n\(first.message)" }
+        let shown = failed.prefix(5).map { "“\($0.name)”: \($0.message)" }.joined(separator: "\n")
+        let more = failed.count > 5 ? "\n…and \(failed.count - 5) more" : ""
+        return "\(failed.count) items couldn’t be copied.\n\n\(shown)\(more)\n\nThey stay in the transfer list, where you can retry them."
     }
 
     public func cancel(_ t: Transfer) {
@@ -99,8 +127,17 @@ public final class TransferQueue: ObservableObject {
         }
     }
 
+    /// Replaces a finished transfer with a fresh copy of it, in the same place in the list.
     public func retry(_ t: Transfer) {
-        add([t.retryCopy()])
+        guard t.state.isFinished else { return }
+        let copy = t.retryCopy()
+        if let i = items.firstIndex(where: { $0 === t }) {
+            items[i] = copy
+            updateActive()
+            pump()
+        } else {
+            add([copy])
+        }
     }
 
     public func clearFinished() {
@@ -136,9 +173,12 @@ public final class TransferQueue: ObservableObject {
     }
 
     private func execute(_ t: Transfer) async {
+        // Cancelled while it waited for its turn.
+        guard t.state == .waiting else { return }
         t.state = .running
         t.startedAt = Date()
         let dest = t.destPath
+        let staging = t.stagingPath
 
         // Never touch something that was already there unless the person said "Replace".
         let exists = t.direction == .toDevice
@@ -149,41 +189,41 @@ public final class TransferQueue: ObservableObject {
         }
 
         // Size and free space, checked before anything is deleted. Space freed by a replaced item counts.
+        let free: Int64?
+        let reclaimed: Int64
         if t.direction == .toDevice {
             let src = t.source
             t.total = await Task.detached { LocalFS.size(URL(fileURLWithPath: src)) }.value
-            let reclaimed = exists ? (await adb.size(t.serial, dest) ?? 0) : 0
-            if let free = await adb.freeBytes(t.serial, t.destDir), free + reclaimed < t.total {
-                return finish(t, .failed("Not enough space on the device: needs \(Fmt.bytes(t.total)), only \(Fmt.bytes(free + reclaimed)) free"))
-            }
+            reclaimed = exists ? (await adb.size(t.serial, dest) ?? 0) : 0
+            free = await adb.freeBytes(t.serial, t.destDir)
         } else {
             guard let size = await adb.size(t.serial, t.source) else {
                 return finish(t, .failed("Couldn’t find “\(t.name)” on the device"))
             }
             t.total = size
-            let reclaimed = exists ? LocalFS.size(URL(fileURLWithPath: dest)) : 0
-            if let free = LocalFS.freeBytes(URL(fileURLWithPath: t.destDir)), free + reclaimed < t.total {
-                return finish(t, .failed("Not enough space on this Mac: needs \(Fmt.bytes(t.total)), only \(Fmt.bytes(free + reclaimed)) free"))
-            }
+            reclaimed = exists ? LocalFS.size(URL(fileURLWithPath: dest)) : 0
+            free = LocalFS.freeBytes(URL(fileURLWithPath: t.destDir))
+        }
+        if let free, free + reclaimed < t.total {
+            let place = t.direction == .toDevice ? "on the device" : "on this Mac"
+            return finish(t, .failed("Not enough space \(place): needs \(Fmt.bytes(t.total)), only \(Fmt.bytes(free + reclaimed)) free"))
         }
         if t.cancelRequested { return finish(t, .cancelled) }
 
-        if exists {
-            if t.direction == .toDevice {
-                let r = await adb.delete(t.serial, dest)
-                if !r.ok { return finish(t, .failed("Couldn’t replace the existing item: \(r.message)")) }
-            } else {
-                do { try FileManager.default.removeItem(atPath: dest) } catch {
-                    return finish(t, .failed("Couldn’t replace the existing item: \(error.localizedDescription)"))
-                }
-            }
+        // A replaced item stays until its replacement is verified. Only when the new copy fits
+        // just because the old one goes is the old one deleted first.
+        let deleteFirst = exists && (free.map { $0 < t.total } ?? false)
+
+        await remove(t, staging) // left over from a copy that was interrupted earlier
+        if deleteFirst, let error = await remove(t, dest) {
+            return finish(t, .failed("Couldn’t replace the existing item: \(error)"))
         }
 
-        // Copy, polling the destination size for progress.
-        let poller = Task { await self.poll(t) }
+        // Copy, polling the copy's size for progress.
+        let poller = Task { await self.poll(t, staging) }
         let args = t.direction == .toDevice
-            ? ["-s", t.serial, "push", t.source, dest]
-            : ["-s", t.serial, "pull", t.source, dest]
+            ? ["-s", t.serial, "push", t.source, staging]
+            : ["-s", t.serial, "pull", t.source, staging]
         let result = await adb.run(args) { process in
             DispatchQueue.main.async {
                 t.process = process
@@ -193,46 +233,86 @@ public final class TransferQueue: ObservableObject {
         poller.cancel()
 
         if t.cancelRequested {
-            await removePartial(t)
+            await remove(t, staging)
             return finish(t, .cancelled)
         }
         guard result.ok else {
-            await removePartial(t)
+            await remove(t, staging)
             return finish(t, .failed(result.message))
         }
 
         // Verify single files byte-for-byte by size.
         if !t.isDirectory {
             let final: Int64? = t.direction == .toDevice
-                ? await adb.size(t.serial, dest)
-                : LocalFS.size(URL(fileURLWithPath: dest))
+                ? await adb.size(t.serial, staging)
+                : LocalFS.size(URL(fileURLWithPath: staging))
             if final != t.total {
-                await removePartial(t)
+                await remove(t, staging)
                 return finish(t, .failed("Size check failed: expected \(t.total) bytes, got \(final ?? 0). The copy was removed."))
             }
+        }
+
+        if let error = await moveIntoPlace(t, replacing: exists && !deleteFirst) {
+            await remove(t, staging)
+            return finish(t, .failed("Couldn’t put the copy in place: \(error)"))
         }
         t.transferred = t.total
         finish(t, .done)
     }
 
-    private func removePartial(_ t: Transfer) async {
+    /// Deletes `path` on the transfer's destination side. Returns an error message, or nil.
+    @discardableResult
+    private func remove(_ t: Transfer, _ path: String) async -> String? {
         if t.direction == .toDevice {
-            _ = await adb.delete(t.serial, t.destPath)
-        } else {
-            try? FileManager.default.removeItem(atPath: t.destPath)
+            let r = await adb.delete(t.serial, path)
+            return r.ok ? nil : r.message
+        }
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        do { try FileManager.default.removeItem(atPath: path) } catch { return error.localizedDescription }
+        return nil
+    }
+
+    /// Renames the verified copy to its real name, swapping out the old item when replacing.
+    /// Returns an error message, or nil. On failure the old item is back under its own name.
+    private func moveIntoPlace(_ t: Transfer, replacing: Bool) async -> String? {
+        if t.direction == .toDevice {
+            let r = replacing
+                ? await adb.swapIn(t.serial, t.stagingPath, as: t.destPath, aside: t.asidePath)
+                : await adb.move(t.serial, from: t.stagingPath, to: t.destPath)
+            return r.ok ? nil : r.message
+        }
+        let fm = FileManager.default
+        do {
+            guard replacing else {
+                try fm.moveItem(atPath: t.stagingPath, toPath: t.destPath)
+                return nil
+            }
+            try? fm.removeItem(atPath: t.asidePath)
+            try fm.moveItem(atPath: t.destPath, toPath: t.asidePath)
+            do {
+                try fm.moveItem(atPath: t.stagingPath, toPath: t.destPath)
+            } catch {
+                try? fm.moveItem(atPath: t.asidePath, toPath: t.destPath)
+                throw error
+            }
+            try? fm.removeItem(atPath: t.asidePath)
+            return nil
+        } catch {
+            return error.localizedDescription
         }
     }
 
-    private func poll(_ t: Transfer) async {
+    private func poll(_ t: Transfer, _ path: String) async {
         var lastBytes: Int64 = 0
         var lastTime = Date()
-        let dest = t.destPath
+        // Measuring a folder walks all of it (`du` on the device), so do that less often.
+        let interval: UInt64 = t.isDirectory ? 5_000_000_000 : 1_000_000_000
         while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            try? await Task.sleep(nanoseconds: interval)
             if Task.isCancelled { break }
             let current: Int64? = t.direction == .toDevice
-                ? await adb.size(t.serial, dest)
-                : await Task.detached { LocalFS.size(URL(fileURLWithPath: dest)) }.value
+                ? await adb.size(t.serial, path)
+                : await Task.detached { LocalFS.size(URL(fileURLWithPath: path)) }.value
             guard let current, !Task.isCancelled, t.state == .running else { continue }
             let now = Date()
             let dt = now.timeIntervalSince(lastTime)

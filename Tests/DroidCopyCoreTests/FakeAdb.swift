@@ -47,7 +47,7 @@ struct FakeAdb {
 
         let copy: (CopyMode) -> String = { mode in
             switch mode {
-            case .normal: return #"cp -R "$1" "$2""#
+            case .normal: return #"cp -RL "$1" "$2""#
             case .fail: return #"head -c 3 "$1" > "$2"; echo "adb: error: failed to copy: Broken pipe" >&2; exit 1"#
             case .truncate: return #"head -c 3 "$1" > "$2""#
             case .hang: return #"head -c 3 "$1" > "$2"; exec sleep 60"#

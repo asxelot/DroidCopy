@@ -136,8 +136,10 @@ final class AppModel: ObservableObject {
             }
         }
         let free = await adb.freeBytes(d.serial, dir)
-        if dir == deviceDir { deviceFree = free }
-        deviceLoading = false
+        if dir == deviceDir {
+            deviceFree = free
+            deviceLoading = false
+        }
     }
 
     var deviceCanGoUp: Bool {
@@ -211,18 +213,22 @@ final class AppModel: ObservableObject {
     }
 
     func copyToDevice(_ urls: [URL]) {
-        guard let d = device, !deviceDir.isEmpty else {
+        guard let adb, let d = device, !deviceDir.isEmpty else {
             alertMessage = "Connect a device first."
             return
         }
-        let existing = Set(deviceItems.map(\.name))
-        let plans = urls.map { url -> Plan in
-            var isDir: ObjCBool = false
-            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-            return Plan(direction: .toDevice, source: url.path, name: url.lastPathComponent,
-                        isDirectory: isDir.boolValue, conflict: existing.contains(url.lastPathComponent))
+        let dir = deviceDir
+        Task {
+            // Ask the device, not the listing: the listing hides dot-files and may still be loading.
+            let existing = await adb.existingNames(d.serial, in: dir, urls.map(\.lastPathComponent))
+            let plans = urls.map { url -> Plan in
+                var isDir: ObjCBool = false
+                FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+                return Plan(direction: .toDevice, source: url.path, name: url.lastPathComponent,
+                            isDirectory: isDir.boolValue, conflict: existing.contains(url.lastPathComponent))
+            }
+            submit(PendingBatch(plans: plans, serial: d.serial, destDir: dir))
         }
-        submit(PendingBatch(plans: plans, serial: d.serial, destDir: deviceDir))
     }
 
     private static let macFolderKey = "macDestinationFolder"
@@ -269,10 +275,14 @@ final class AppModel: ObservableObject {
         queue.add(transfers)
     }
 
+    private var failedInBatch: [Transfer] = []
+
     private func transferFinished(_ t: Transfer) {
-        // The transfer list hides when nothing is active, so failures must be announced.
-        if case .failed(let message) = t.state {
-            alertMessage = "Couldn’t copy “\(t.name)”.\n\n\(message)"
+        // One alert per batch, listing every failure, once nothing is left to copy.
+        if t.state.isFailed { failedInBatch.append(t) }
+        if !queue.hasActive {
+            if let summary = TransferQueue.failureSummary(failedInBatch) { alertMessage = summary }
+            failedInBatch = []
         }
         if t.direction == .toDevice, t.destDir == deviceDir {
             Task { await loadDevice() }

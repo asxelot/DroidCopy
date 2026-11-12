@@ -113,3 +113,14 @@ import Testing
         #expect(Fmt.speed(2048).hasPrefix(Fmt.bytes(2048)))
     }
 }
+
+@Suite struct LocalFSSymlinkTests {
+    @Test func sizeFollowsSymlinkToFile() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("localfs-link-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try writeFile(dir.appendingPathComponent("real").path, String(repeating: "x", count: 4000))
+        try FileManager.default.createSymbolicLink(atPath: dir.appendingPathComponent("link").path, withDestinationPath: "real")
+        #expect(LocalFS.size(dir.appendingPathComponent("link")) == 4000)
+    }
+}

@@ -102,6 +102,71 @@ import Testing
         #expect(readFile(Parse.join(dir, "a")) == "A")
         #expect(readFile(Parse.join(dir, "b")) == "B")
     }
+
+    @Test func existingNamesFindsHiddenAndAwkwardNames() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dir = try fake.deviceDir()
+        try writeFile(Parse.join(dir, ".nomedia"), "")
+        try writeFile(Parse.join(dir, Self.awkwardName), "x")
+        try FileManager.default.createDirectory(atPath: Parse.join(dir, "Folder"), withIntermediateDirectories: false)
+
+        let found = await fake.adb.existingNames("FAKE123", in: dir, [".nomedia", Self.awkwardName, "Folder", "missing", "-n"])
+        #expect(found == [".nomedia", Self.awkwardName, "Folder"])
+        #expect(await fake.adb.existingNames("FAKE123", in: dir, []).isEmpty)
+        #expect(await fake.adb.existingNames("FAKE123", in: Parse.join(dir, "nope"), ["Folder"]).isEmpty)
+    }
+
+    @Test func listOfUnreadableFolderSaysSo() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dir = try fake.deviceDir("locked")
+        try writeFile(Parse.join(dir, "secret"), "x")
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: dir)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir) }
+
+        await #expect {
+            _ = try await fake.adb.list("FAKE123", dir)
+        } throws: { error in
+            (error as? AdbError)?.message == "The device doesn’t allow reading this folder"
+        }
+    }
+
+    @Test func swapInReplacesAndCleansUp() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dir = try fake.deviceDir()
+        let (staging, dest, aside) = (Parse.join(dir, ".dc~a b"), Parse.join(dir, "a b"), Parse.join(dir, ".dc-old~a b"))
+        try FileManager.default.createDirectory(atPath: dest, withIntermediateDirectories: false)
+        try writeFile(Parse.join(dest, "old"), "o")
+        try writeFile(staging, "new")
+
+        #expect(await fake.adb.swapIn("FAKE123", staging, as: dest, aside: aside).ok)
+        #expect(readFile(dest) == "new")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir) == ["a b"])
+    }
+
+    @Test func swapInPutsTheOriginalBackWhenTheNewCopyIsMissing() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dir = try fake.deviceDir()
+        let dest = Parse.join(dir, "a")
+        try writeFile(dest, "original")
+
+        let r = await fake.adb.swapIn("FAKE123", Parse.join(dir, ".dc~a"), as: dest, aside: Parse.join(dir, ".dc-old~a"))
+        #expect(!r.ok)
+        #expect(readFile(dest) == "original")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir) == ["a"])
+    }
+
+    @Test func sizeFollowsSymlinks() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dir = try fake.deviceDir()
+        try writeFile(Parse.join(dir, "real"), String(repeating: "x", count: 3000))
+        try FileManager.default.createSymbolicLink(atPath: Parse.join(dir, "link"), withDestinationPath: "real")
+        #expect(await fake.adb.size("FAKE123", Parse.join(dir, "link")) == 3000)
+    }
 }
 
 @Suite struct RunResultTests {

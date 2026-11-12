@@ -42,12 +42,13 @@ struct ContentView: View {
     }
 }
 
-/// The device pane, plus the transfer list only while something is copying or waiting.
+/// The device pane, plus the transfer list while something is copying or waiting, or failed and
+/// not yet retried or cleared.
 struct MainLayout: View {
     @ObservedObject var queue: TransferQueue
 
     var body: some View {
-        if queue.activeCount > 0 {
+        if queue.activeCount > 0 || queue.failedCount > 0 {
             VSplitView {
                 DevicePane().frame(minHeight: 280, maxHeight: .infinity)
                 TransferList(queue: queue)
