@@ -169,6 +169,8 @@ final class AppModel: ObservableObject {
             adbMissing = true
             return
         }
+        // Start adb's server where it won't count as part of DroidCopy (see `Adb.startServer`).
+        _ = await adb.startServer { await AdbHelper.startServer(adbPath: adb.path) }
         while true {
             await pollDevices()
             try? await Task.sleep(nanoseconds: 2_000_000_000)

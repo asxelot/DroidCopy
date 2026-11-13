@@ -274,3 +274,60 @@ import DroidCopyTestSupport
         #expect(!clash.ok, "a different item that differs only in case is still a clash")
     }
 }
+
+@Suite struct ServerLaunchTests {
+    @Test func startsTheServerWhenNoneIsRunning() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("dc-server-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let port: UInt16 = 45_000 + UInt16.random(in: 0..<1000)
+        let pidFile = dir.appendingPathComponent("server.pid").path
+        // A stand-in adb whose "server" just listens on the port, like adb's does.
+        let fake = dir.appendingPathComponent("adb")
+        try writeFile(fake.path, """
+            #!/bin/sh
+            [ "$1" = start-server ] || exit 1
+            nohup /usr/bin/nc -lk 127.0.0.1 \(port) >/dev/null 2>&1 &
+            echo $! > '\(pidFile)'
+            """)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+        defer {
+            if let pid = readFile(pidFile).flatMap({ Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }) { kill(pid, SIGTERM) }
+        }
+
+        #expect(!Adb.serverIsRunning(port: port))
+        var launches = 0
+        let started = await Adb(path: fake.path).startServer(port: port) {
+            launches += 1
+            return Process.run(fake.path, ["start-server"]) == ""
+        }
+        #expect(started && launches == 1)
+        #expect(Adb.serverIsRunning(port: port))
+
+        // Already running: nothing is launched again.
+        #expect(await Adb(path: fake.path).startServer(port: port) { launches += 1; return true })
+        #expect(launches == 1)
+    }
+
+    @Test func aLaunchThatFailsOrNeverListensIsReported() async {
+        let adb = Adb(path: "/nonexistent/adb")
+        #expect(!(await adb.startServer(port: 1, wait: 0.2) { false }))
+        #expect(!(await adb.startServer(port: 1, wait: 0.2) { true }), "launched, but nothing listens")
+    }
+}
+
+private extension Process {
+    /// Runs a command to completion and returns its output.
+    static func run(_ path: String, _ args: [String]) -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+    }
+}

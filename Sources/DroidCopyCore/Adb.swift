@@ -84,10 +84,16 @@ public final class Adb: @unchecked Sendable {
     /// other worker threads deadlocks once many commands run at once and the pool is used up.)
     public func run(_ args: [String], timeout: TimeInterval? = nil,
                     onStart: (@Sendable (Process) -> Void)? = nil) async -> RunResult {
+        await Self.execute(path, args, timeout: timeout, onStart: onStart)
+    }
+
+    /// Runs any program the way `run` runs adb.
+    public static func execute(_ executable: String, _ args: [String], timeout: TimeInterval? = nil,
+                               onStart: (@Sendable (Process) -> Void)? = nil) async -> RunResult {
         await withCheckedContinuation { cont in
             let once = ResumeOnce(cont)
             let p = Process()
-            p.executableURL = URL(fileURLWithPath: self.path)
+            p.executableURL = URL(fileURLWithPath: executable)
             p.arguments = args
             let out = Pipe(), err = Pipe()
             p.standardOutput = out
@@ -134,6 +140,43 @@ public final class Adb: @unchecked Sendable {
                     status: p.terminationStatus))
             }
         }
+    }
+
+    // MARK: The adb server
+
+    /// Whether something (an adb server) is listening on adb's port on this Mac.
+    public static func serverIsRunning(port: UInt16 = 5037) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let r = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        return r == 0
+    }
+
+    /// Starts the adb server with `launch` when none is running, and waits until it listens.
+    /// Returns false if it didn't come up; adb then starts the server itself, as it always does.
+    ///
+    /// Why not let adb start it: macOS counts processes an app starts, and everything they start,
+    /// as part of that app. adb's server should outlive DroidCopy (other apps may use it), and
+    /// while it runs the Dock shows DroidCopy as "Running in Background" after it has quit. The
+    /// app's `launch` therefore starts the server from a separate background-only helper app.
+    public func startServer(port: UInt16 = 5037, wait: TimeInterval = 10,
+                            launch: () async -> Bool) async -> Bool {
+        if Self.serverIsRunning(port: port) { return true }
+        guard await launch() else { return false }
+        let deadline = Date().addingTimeInterval(wait)
+        while Date() < deadline {
+            if Self.serverIsRunning(port: port) { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return false
     }
 
     /// How long a quick question to the device (a listing, free space, whether a name is taken)

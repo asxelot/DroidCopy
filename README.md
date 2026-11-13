@@ -94,6 +94,12 @@ device off or take the card out right after, then stops using the device. The de
 ejected until you unplug it or click **Reconnect**. adb itself keeps running, because other apps
 may be using it.
 
+**adb's server** keeps running after DroidCopy quits, because other apps may be using it. When
+none is running, DroidCopy starts it through a tiny background-only helper app inside
+DroidCopy.app (`Contents/Helpers/DroidCopy adb.app`). macOS counts whatever an app starts as part
+of that app, so a server started by DroidCopy itself would keep DroidCopy showing as "Running in
+Background" in the Dock after it quits.
+
 **Closing the window quits DroidCopy.** If copies are still running, it asks first: **Keep
 Copying** brings the window back, and **Quit Anyway** cancels them and removes the unfinished
 copies.
