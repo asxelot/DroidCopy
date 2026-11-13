@@ -34,15 +34,43 @@ Downloads after you install a new build.
 
 ## Using it
 
-The window shows the connected device. If there is an SD card, it opens there; otherwise it
-opens internal storage. Double-click a folder to open it, and use the path bar or ↑ to go back.
+The window works like a Finder window in list view, for the connected device.
+
+- **Sidebar:** Favourites, then the device with its storages (Internal, SD card) and an Eject
+  button. Favourites start with the usual folders the device has (`ROMs` on the card,
+  Download, Documents, DCIM, Pictures, Movies and Music). Pin more with **Add to Sidebar**
+  (⌃⌘T, or right-click a folder), drag them into a different order, and right-click to remove
+  one. They're kept per device.
+- **Getting around:** double-click a folder or press ⌘↓/⌘O. Back and Forward (⌘[ ⌘]), Enclosing
+  Folder (⌘↑), Go to Folder (⇧⌘G) and the path bar at the bottom work as in Finder. The first
+  time, it opens the SD card, or internal storage if there's no card. After that, it opens the
+  folder you were in last.
+- **Search** (⌘F) narrows the folder being shown. You can also type a name to jump to it.
+- **View menu:** show hidden files (⇧⌘.), the path bar (⌥⌘P) and the status bar (⌘/), which
+  shows the item count and free space.
+- **Opening files:** double-click a file to copy it to the Mac and open it there. Space shows it
+  in Quick Look. Files over 1 GB aren't previewed.
+
+If the device stops answering (an SD card busy finishing a big write, say), the folder shows
+"The device isn't responding" after 20 seconds and a **Try Again** button, instead of waiting
+forever.
 
 **Copying to the device**
 - Drag files or folders from Finder onto the list, or
 - copy them in Finder (⌘C), click the list and paste (⌘V).
 
-They go into the folder being shown, and each item is selected as it arrives, so you can see
-what was copied.
+They go into the folder being shown, or into a folder if you drop them onto its row or onto a
+sidebar location. Each item is selected as it arrives, so you can see what was copied. When a
+batch finishes while you're in another app, you get a notification. The Dock icon shows
+progress meanwhile.
+
+**Moving and copying on the device**
+- Drag items onto a folder row or a sidebar location to move them there. Hold ⌥ to copy instead.
+- Or cut them (⌘X), open another folder and paste (⌘V). Cut items are shown faded until then.
+- **Duplicate** (⌘D) makes "name copy", like Finder.
+
+Name clashes are asked about first. Copies on the device use the same hidden-name-until-done
+rule as copies from the Mac.
 
 **Copying to the Mac**
 - Drag items from the list into any Finder window or onto the Desktop. Finder asks DroidCopy for
@@ -53,10 +81,14 @@ what was copied.
   files, dragging or **Copy to Mac…** is better because they don't make that extra copy.
 - **Copy to Mac…** on the right-click menu asks for a folder and copies there.
 
-**Other actions:** New Folder, and Rename… and Delete… on the right-click menu. Delete (⌫) also
-works on the selection.
+**Other actions**, from the File menu, the toolbar's Action button or the right-click menu:
+- **New Folder** (⇧⌘N) makes "untitled folder" and lets you name it.
+- **Rename:** press Return, as in Finder, and edit the name in place.
+- **Get Info** (⌘I) shows size, item count, kind and path.
+- **Copy Path** (⌥⌘C) copies the device path as text.
+- **Delete…** (⌘⌫ or ⌫) asks first. Android has no Trash, so a delete can't be undone.
 
-**Ejecting:** click **Eject** before unplugging. It's unavailable while copies are running. It
+**Ejecting:** click **Eject** (⌘E) before unplugging. It's unavailable while copies are running. It
 tells the device to write everything to storage (`sync`), so nothing is lost if you switch the
 device off or take the card out right after, then stops using the device. The device stays
 ejected until you unplug it or click **Reconnect**. adb itself keeps running, because other apps

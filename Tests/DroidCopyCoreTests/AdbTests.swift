@@ -195,3 +195,82 @@ import DroidCopyTestSupport
         #expect(Adb.locate(environment: ["DROIDCOPY_ADB": "/nonexistent/adb"]) == nil)
     }
 }
+
+@Suite struct DeviceSideTests {
+    @Test func aCommandThatHangsTimesOut() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let started = Date()
+        let r = await fake.adb.shell("FAKE123", "sleep 3; echo late", timeout: 0.3)
+        #expect(r.timedOut && !r.ok)
+        #expect(r.message == AdbError.notRespondingMessage)
+        #expect(Date().timeIntervalSince(started) < 2)
+        let quick = await fake.adb.shell("FAKE123", "echo hi", timeout: 5)
+        #expect(quick.ok && quick.output == "hi\n")
+    }
+
+    @Test func listingAnUnresponsiveDeviceThrowsNotResponding() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dir = try fake.deviceDir()
+        fake.adb.quickTimeout = 0.3
+        let ls = fake.root.appendingPathComponent("bin/ls")
+        try writeFile(ls.path, "#!/bin/sh\nsleep 3\n")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ls.path)
+        await #expect(throws: AdbError.self) { try await fake.adb.list("FAKE123", dir) }
+        do { _ = try await fake.adb.list("FAKE123", dir) } catch { #expect(error.localizedDescription == AdbError.notRespondingMessage) }
+    }
+
+    @Test func copyOnTheDeviceIsCompleteOrAbsent() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dir = try fake.deviceDir()
+        try FileManager.default.createDirectory(atPath: Parse.join(dir, "src/sub"), withIntermediateDirectories: true)
+        try writeFile(Parse.join(dir, "src/sub/" + AdbTests.awkwardName), "data")
+
+        let r = await fake.adb.copy("FAKE123", from: Parse.join(dir, "src"), to: Parse.join(dir, "dst"))
+        #expect(r.ok)
+        #expect(readFile(Parse.join(dir, "dst/sub/" + AdbTests.awkwardName)) == "data")
+
+        let again = await fake.adb.copy("FAKE123", from: Parse.join(dir, "src"), to: Parse.join(dir, "dst"))
+        #expect(!again.ok && again.message.contains("already exists"))
+
+        try writeFile(Parse.join(dir, "src/sub/new.txt"), "n")
+        let replaced = await fake.adb.copy("FAKE123", from: Parse.join(dir, "src"), to: Parse.join(dir, "dst"), replace: true)
+        #expect(replaced.ok)
+        #expect(readFile(Parse.join(dir, "dst/sub/new.txt")) == "n")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir).sorted() == ["dst", "src"], "no hidden leftovers")
+
+        let missing = await fake.adb.copy("FAKE123", from: Parse.join(dir, "nope"), to: Parse.join(dir, "x"))
+        #expect(!missing.ok)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir).sorted() == ["dst", "src"])
+    }
+
+    @Test func moveCanReplaceAndCountsItems() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dir = try fake.deviceDir()
+        try writeFile(Parse.join(dir, "a"), "new")
+        try writeFile(Parse.join(dir, "b"), "old")
+        #expect(!(await fake.adb.move("FAKE123", from: Parse.join(dir, "a"), to: Parse.join(dir, "b"))).ok)
+        #expect((await fake.adb.move("FAKE123", from: Parse.join(dir, "a"), to: Parse.join(dir, "b"), replace: true)).ok)
+        #expect(readFile(Parse.join(dir, "b")) == "new")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir) == ["b"])
+        #expect(await fake.adb.itemCount("FAKE123", dir) == 1)
+    }
+}
+
+@Suite struct CaseOnlyRenameTests {
+    @Test func renamingOnlyTheCaseWorksOnCaseInsensitiveStorage() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dir = try fake.deviceDir()
+        try FileManager.default.createDirectory(atPath: Parse.join(dir, "ROMs"), withIntermediateDirectories: false)
+        try writeFile(Parse.join(dir, "Other"), "o")
+        let r = await fake.adb.move("FAKE123", from: Parse.join(dir, "ROMs"), to: Parse.join(dir, "Roms"))
+        #expect(r.ok, "\(r.message)")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir).sorted() == ["Other", "Roms"])
+        let clash = await fake.adb.move("FAKE123", from: Parse.join(dir, "Roms"), to: Parse.join(dir, "other"))
+        #expect(!clash.ok, "a different item that differs only in case is still a clash")
+    }
+}

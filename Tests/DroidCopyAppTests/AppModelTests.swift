@@ -16,15 +16,24 @@ final class Harness {
     let mac: URL
     let pasteboard = NSPasteboard(name: .init("droidcopy-test-\(UUID().uuidString)"))
     let cache: URL
+    let defaultsSuite = "droidcopy-test-\(UUID().uuidString)"
+    let defaults: UserDefaults
+    /// Files the app opened on the Mac, and notifications it posted.
+    var opened: [URL] = []
+    var notifications: [(String, String)] = []
 
     init(push: FakeAdb.CopyMode = .normal, pull: FakeAdb.CopyMode = .normal) throws {
         fake = try FakeAdb(push: push, pull: pull)
         dev = try fake.deviceDir("card")
         mac = try fake.macDir()
         cache = fake.root.appendingPathComponent("cache")
-        model = AppModel(adb: fake.adb, pasteboard: pasteboard, clipboardCache: cache)
+        defaults = UserDefaults(suiteName: defaultsSuite)!
+        model = AppModel(adb: fake.adb, pasteboard: pasteboard, clipboardCache: cache,
+                         openCache: fake.root.appendingPathComponent("open"), defaults: defaults)
         model.queue.progressDelay = 60
         model.device = DeviceInfo(serial: "FAKE123", state: "device", model: "Fake_Phone")
+        model.openOnMac = { [unowned self] in self.opened.append($0) }
+        model.notify = { [unowned self] in self.notifications.append(($0, $1)) }
     }
 
     /// Opens the fake card and waits for its listing.
@@ -49,7 +58,20 @@ final class Harness {
 
     func cleanUp() {
         pasteboard.releaseGlobally()
+        defaults.removePersistentDomain(forName: defaultsSuite)
         fake.cleanUp()
+    }
+
+    /// Makes a folder (and its parents) on the fake device.
+    func mkdir(_ path: String) throws {
+        try FileManager.default.createDirectory(atPath: Parse.join(dev, path), withIntermediateDirectories: true)
+    }
+
+    /// Replaces a "device" command with a script, like a slow `rm` or a hanging `ls`.
+    func stub(_ command: String, _ script: String) throws {
+        let url = fake.root.appendingPathComponent("bin/\(command)")
+        try writeFile(url.path, "#!/bin/sh\n" + script + "\n")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
     }
 }
 
@@ -79,13 +101,17 @@ final class Harness {
         #expect(h.model.deviceCrumbs.map(\.title) == ["SD card"])
     }
 
-    @Test func openingAFileDoesNothing() async throws {
+    @Test func openingAFilePullsItAndOpensItOnTheMac() async throws {
         let h = try Harness()
         defer { h.cleanUp() }
-        try writeFile(Parse.join(h.dev, "a.txt"), "a")
+        try writeFile(Parse.join(h.dev, "a.txt"), "hello")
         await h.open()
         h.model.openDevice(h.item("a.txt")!)
-        #expect(h.model.deviceDir == h.dev)
+        await waitUntil { !h.opened.isEmpty }
+        #expect(h.model.deviceDir == h.dev, "a file doesn't change the folder")
+        #expect(h.opened.count == 1 && h.opened[0].lastPathComponent == "a.txt")
+        #expect(readFile(h.opened[0].path) == "hello")
+        #expect(h.notifications.isEmpty, "opening a file isn't worth a notification")
     }
 
     @Test func missingFolderShowsAnError() async throws {
@@ -124,15 +150,15 @@ final class Harness {
         defer { h.cleanUp() }
         for name in ["a.bin", "b.bin", "c.bin"] { try writeFile(Parse.join(h.dev, name), "x") }
         await h.open()
-        var seen: [AppModel.DeleteProgress?] = []
-        let watch = h.model.$deleteProgress.sink { seen.append($0) }
+        var seen: [AppModel.DeviceActivity?] = []
+        let watch = h.model.$activity.sink { seen.append($0) }
         defer { watch.cancel() }
 
         await h.model.delete(["a.bin", "b.bin", "c.bin"].compactMap(h.item))
         let shown = seen.compactMap { $0 }
         #expect(shown.map(\.name) == ["a.bin", "b.bin", "c.bin"])
-        #expect(shown.map(\.index) == [1, 2, 3] && shown.allSatisfy { $0.count == 3 })
-        #expect(h.model.deleteProgress == nil)
+        #expect(shown.map(\.index) == [1, 2, 3] && shown.allSatisfy { $0.count == 3 && $0.verb == "Deleting" })
+        #expect(h.model.activity == nil)
         #expect(h.model.deviceItems.isEmpty)
     }
 
@@ -140,18 +166,17 @@ final class Harness {
         let h = try Harness()
         defer { h.cleanUp() }
         // A slow rm on the "device", like a big file on an SD card.
-        try writeFile(h.fake.root.appendingPathComponent("bin/rm").path, "#!/bin/sh\nsleep 2\nexec /bin/rm \"$@\"\n")
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: h.fake.root.appendingPathComponent("bin/rm").path)
+        try h.stub("rm", "sleep 2\nexec /bin/rm \"$@\"")
         try writeFile(Parse.join(h.dev, "big.iso"), "x")
         await h.open()
 
         let deleting = Task { await h.model.delete([h.item("big.iso")!]) }
-        await waitUntil { h.model.deleteProgress != nil }
+        await waitUntil { h.model.activity != nil }
         await h.model.eject()
         #expect(h.model.device != nil && h.model.ejectedSerial == nil)
         #expect(h.model.alertMessage == "Wait for the delete to finish before ejecting.")
         await deleting.value
-        #expect(h.model.deleteProgress == nil && h.item("big.iso") == nil)
+        #expect(h.model.activity == nil && h.item("big.iso") == nil)
     }
 
     @Test func rejectsInvalidNames() async throws {
@@ -465,8 +490,8 @@ final class Harness {
 @Suite @MainActor struct FileTableCoordinatorTests {
     private func coordinator(_ items: [FileItem], deliver: @escaping (FileItem, URL, @escaping (Error?) -> Void) -> Void = { _, _, done in done(nil) })
         -> (FileTable.Coordinator, NSTableView) {
-        let actions = FileTableActions(open: { _ in }, copyToMac: { _ in }, copy: { _ in }, rename: { _ in },
-                                       delete: { _ in }, receive: { _ in }, deliver: deliver)
+        let actions = FileTableActions(open: { _ in }, copyToMac: { _ in }, copy: { _ in }, rename: { _, _ in },
+                                       delete: { _ in }, receive: { _, _ in }, deliver: deliver)
         let c = FileTable.Coordinator(FileTable(items: items, selection: .constant([]), actions: actions))
         let table = NSTableView()
         c.table = table
@@ -510,8 +535,8 @@ final class Harness {
 
     @Test func selectionFollowsTheBinding() {
         var selection: Set<String> = ["/s/a.jpg"]
-        let actions = FileTableActions(open: { _ in }, copyToMac: { _ in }, copy: { _ in }, rename: { _ in },
-                                       delete: { _ in }, receive: { _ in }, deliver: { _, _, d in d(nil) })
+        let actions = FileTableActions(open: { _ in }, copyToMac: { _ in }, copy: { _ in }, rename: { _, _ in },
+                                       delete: { _ in }, receive: { _, _ in }, deliver: { _, _, d in d(nil) })
         let binding = Binding(get: { selection }, set: { selection = $0 })
         let c = FileTable.Coordinator(FileTable(items: items, selection: binding, actions: actions))
         let table = NSTableView()
@@ -525,6 +550,26 @@ final class Harness {
 
         table.selectRowIndexes([0, 2], byExtendingSelection: false)
         #expect(selection == ["/s/ROMs", "/s/b.nsp"])
+    }
+
+    @Test func draggedRowsCarryTheirDevicePaths() throws {
+        let (c, table) = coordinator(items)
+        let pb = NSPasteboard(name: .init("droidcopy-drag-\(UUID().uuidString)"))
+        defer { pb.releaseGlobally() }
+        pb.clearContents()
+        let writers = [0, 2].compactMap { c.tableView(table, pasteboardWriterForRow: $0) }
+        pb.writeObjects(writers)
+        let dragged = FileTable.Coordinator.draggedItems(on: pb)
+        #expect(dragged.map(\.path) == ["/s/ROMs", "/s/b.nsp"])
+        #expect(dragged.map(\.isDirectory) == [true, false])
+        #expect(dragged.map(\.name) == ["ROMs", "b.nsp"])
+    }
+
+    @Test func typingANameFindsItsRow() {
+        let (c, table) = coordinator(items)
+        let name = NSTableColumn(identifier: .init("name"))
+        #expect(c.tableView(table, typeSelectStringFor: name, row: 1) == "a.jpg")
+        #expect(c.tableView(table, typeSelectStringFor: NSTableColumn(identifier: .init("kind")), row: 1) == nil)
     }
 }
 
@@ -574,5 +619,501 @@ final class Harness {
         #expect(two > one + 20, "a second row makes it taller: \(one) → \(two)")
         #expect(abs(many - 400) < 1, "twelve rows fill the room and scroll: \(many)")
         #expect(abs(try await panelHeight(12, room: 250) - 250) < 1, "a smaller window gives a smaller panel")
+    }
+}
+
+@Suite @MainActor struct NavigationTests {
+    @Test func backAndForwardRetraceTheFoldersVisited() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("ROMs/switch")
+        await h.open()
+        #expect(!h.model.canGoBack && !h.model.canGoForward)
+
+        h.model.openDevice(h.item("ROMs")!)
+        await h.settle()
+        h.model.openDevice(h.item("switch")!)
+        await h.settle()
+        #expect(h.model.folderTitle == "switch")
+
+        h.model.goBack()
+        await h.settle()
+        #expect(h.model.deviceDir == Parse.join(h.dev, "ROMs"))
+        #expect(h.model.canGoForward)
+        h.model.goBack()
+        await h.settle()
+        #expect(h.model.deviceDir == h.dev && !h.model.canGoBack)
+        #expect(h.model.folderTitle == "SD card")
+
+        h.model.goForward()
+        await h.settle()
+        #expect(h.model.deviceDir == Parse.join(h.dev, "ROMs"))
+
+        // Going somewhere new drops the forward history, like Finder.
+        h.model.deviceUp()
+        await h.settle()
+        #expect(!h.model.canGoForward)
+    }
+
+    @Test func goingUpSelectsTheFolderYouCameFrom() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("ROMs/switch")
+        try h.mkdir("Saves")
+        await h.open()
+        h.model.goDevice(Parse.join(h.dev, "ROMs/switch"))
+        await h.settle()
+        h.model.deviceUp()
+        await h.settle()
+        #expect(h.model.deviceSelection == [Parse.join(h.dev, "ROMs/switch")])
+    }
+
+    @Test func goToFolderTakesFullAndRelativePaths() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("ROMs/switch")
+        await h.open()
+        h.model.goToFolder("ROMs/switch/")
+        await h.settle()
+        #expect(h.model.deviceDir == Parse.join(h.dev, "ROMs/switch"))
+        h.model.goToFolder(Parse.join(h.dev, "ROMs"))
+        await h.settle()
+        #expect(h.model.deviceDir == Parse.join(h.dev, "ROMs"))
+        #expect(h.model.deviceItems.map(\.name) == ["switch"])
+    }
+
+    @Test func searchNarrowsTheFolderAndTheStatusBarCounts() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        for name in ["Doom.nsp", "doom-update.nsp", "Zelda.nsp"] { try writeFile(Parse.join(h.dev, name), "x") }
+        await h.open()
+        #expect(h.model.statusText.hasPrefix("3 items, "))
+        #expect(h.model.statusText.hasSuffix(" available"))
+
+        h.model.searchText = "DOOM"
+        #expect(Set(h.model.visibleItems.map(\.name)) == ["Doom.nsp", "doom-update.nsp"])
+        h.model.deviceSelection = [Parse.join(h.dev, "Zelda.nsp"), Parse.join(h.dev, "Doom.nsp")]
+        #expect(h.model.selectedItems.map(\.name) == ["Doom.nsp"], "hidden by the search, so not acted on")
+        #expect(h.model.statusText.hasPrefix("1 of 2 selected"))
+
+        h.model.searchText = "zzz"
+        #expect(h.model.visibleItems.isEmpty)
+
+        h.model.goDevice(h.dev)
+        #expect(h.model.searchText.isEmpty, "opening a folder ends the search")
+    }
+
+    @Test func hiddenFilesShowWhenAskedAndTheChoiceIsKept() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, ".nomedia"), "")
+        try writeFile(Parse.join(h.dev, "a.txt"), "a")
+        await h.open()
+        #expect(h.model.deviceItems.map(\.name) == ["a.txt"])
+
+        h.model.showHidden = true
+        await h.settle()
+        #expect(h.model.deviceItems.map(\.name) == [".nomedia", "a.txt"])
+        #expect(h.defaults.bool(forKey: "showHiddenFiles"))
+        let again = AppModel(adb: h.fake.adb, pasteboard: h.pasteboard, clipboardCache: h.cache, defaults: h.defaults)
+        #expect(again.showHidden)
+    }
+
+    @Test func aDeviceThatStopsAnsweringSaysSoAndCanBeRetried() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "a.txt"), "a")
+        await h.open()
+        h.fake.adb.quickTimeout = 0.5
+        try h.stub("ls", "sleep 3")   // the listing's first step hangs, like a busy SD card
+
+        let started = Date()
+        await h.model.loadDevice()
+        #expect(Date().timeIntervalSince(started) < 2.5, "gave up instead of waiting")
+        #expect(h.model.deviceError == AdbError.notRespondingMessage)
+        #expect(!h.model.deviceLoading)
+
+        try FileManager.default.removeItem(at: h.fake.root.appendingPathComponent("bin/ls"))
+        await h.settle()   // Try Again
+        #expect(h.model.deviceError == nil)
+        #expect(h.item("a.txt") != nil)
+    }
+}
+
+@Suite @MainActor struct ConnectTests {
+    /// A fake /storage with internal storage and one card, so connecting can be tested end to end.
+    private func storages(_ h: Harness) throws -> (phone: String, card: String) {
+        let root = try h.fake.deviceDir("storage")
+        h.fake.adb.storageRoot = root
+        let phone = Parse.join(root, "emulated/0"), card = Parse.join(root, "AAAA-1111")
+        try FileManager.default.createDirectory(atPath: Parse.join(card, "ROMs/switch"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: phone, withIntermediateDirectories: true)
+        return (phone, card)
+    }
+
+    @Test func opensTheCardFirstThenRemembersTheLastFolder() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        let (phone, card) = try storages(h)
+        h.model.device = nil
+        await h.model.pollDevices()
+        await h.settle()
+        #expect(h.model.storages.map(\.path) == [phone, card])
+        #expect(h.model.deviceDir == card)
+        #expect(h.model.favorites.map(\.name) == ["ROMs"], "the card's ROMs folder starts in the sidebar")
+
+        h.model.goDevice(Parse.join(card, "ROMs/switch"))
+        await h.settle()
+
+        // Unplug and plug back in: it opens where you left off, and Back has nothing stale.
+        try "List of devices attached\n".write(to: h.fake.root.appendingPathComponent("devices.txt"), atomically: true, encoding: .utf8)
+        await h.model.pollDevices()
+        #expect(h.model.device == nil)
+        try "List of devices attached\nFAKE123  device product:x model:Fake_Phone\n".write(to: h.fake.root.appendingPathComponent("devices.txt"), atomically: true, encoding: .utf8)
+        await h.model.pollDevices()
+        await h.settle()
+        #expect(h.model.deviceDir == Parse.join(card, "ROMs/switch"))
+        #expect(h.model.storage?.path == card)
+        #expect(!h.model.canGoBack)
+    }
+
+    @Test func aRememberedFolderThatIsGoneFallsBackToTheCard() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        let (_, card) = try storages(h)
+        h.defaults.set(Parse.join(card, "deleted"), forKey: "lastFolder.FAKE123")
+        h.model.device = nil
+        await h.model.pollDevices()
+        await h.settle()
+        #expect(h.model.deviceDir == card)
+    }
+
+    @Test func goingIntoAnotherStorageSwitchesTheSidebarSelection() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        let (phone, card) = try storages(h)
+        h.model.device = nil
+        await h.model.pollDevices()
+        await h.settle()
+        #expect(h.model.sidebarSelection == card)
+        h.model.goDevice(phone)
+        #expect(h.model.storage?.path == phone)
+        #expect(h.model.sidebarSelection == phone)
+        h.model.goDevice(Parse.join(card, "ROMs"))
+        #expect(h.model.storage?.path == card)
+        #expect(h.model.sidebarSelection == Parse.join(card, "ROMs"), "a favourite highlights too")
+        h.model.goDevice(Parse.join(card, "ROMs/switch"))
+        #expect(h.model.sidebarSelection == nil, "only the location itself is highlighted, as in Finder")
+    }
+}
+
+@Suite @MainActor struct FavoritesTests {
+    @Test func foldersCanBePinnedReorderedAndUnpinned() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("ROMs")
+        try h.mkdir("Saves")
+        try writeFile(Parse.join(h.dev, "a.txt"), "a")
+        await h.open()
+
+        h.model.addToSidebar([h.item("ROMs")!, h.item("a.txt")!, h.item("Saves")!])
+        #expect(h.model.favorites.map(\.name) == ["ROMs", "Saves"], "files aren't pinned")
+        h.model.addToSidebar([h.item("ROMs")!])
+        #expect(h.model.favorites.count == 2, "no duplicates")
+
+        h.model.moveFavorites(from: [1], to: 0)
+        #expect(h.model.favorites.map(\.name) == ["Saves", "ROMs"])
+        h.model.removeFromSidebar(h.model.favorites[0])
+        #expect(h.model.favorites.map(\.name) == ["ROMs"])
+
+        // Kept per device, across launches.
+        h.model.device = nil
+        await h.model.pollDevices()
+        #expect(h.model.favorites.map(\.name) == ["ROMs"])
+    }
+
+    @Test func withNothingSelectedTheOpenFolderIsPinned() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("ROMs/switch")
+        await h.open()
+        h.model.addToSidebar([])
+        #expect(h.model.favorites.isEmpty, "the storage itself is already in the sidebar")
+        h.model.goDevice(Parse.join(h.dev, "ROMs/switch"))
+        await h.settle()
+        h.model.addToSidebar([])
+        #expect(h.model.favorites.map(\.path) == [Parse.join(h.dev, "ROMs/switch")])
+        #expect(h.model.sidebarSelection == Parse.join(h.dev, "ROMs/switch"))
+    }
+
+    @Test func renamingMovingAndDeletingKeepFavoritesRight() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("ROMs/switch")
+        try h.mkdir("Games")
+        await h.open()
+        h.model.goDevice(Parse.join(h.dev, "ROMs"))
+        await h.settle()
+        h.model.addToSidebar([h.item("switch")!])
+        h.model.goDevice(h.dev)
+        await h.settle()
+
+        await h.model.rename(h.item("ROMs")!, to: "Roms")
+        #expect(h.model.favorites.map(\.path) == [Parse.join(h.dev, "Roms/switch")])
+
+        await h.model.move([h.item("Roms")!], to: Parse.join(h.dev, "Games"))
+        #expect(h.model.favorites.map(\.path) == [Parse.join(h.dev, "Games/Roms/switch")])
+
+        await h.model.delete([h.item("Games")!])
+        #expect(h.model.favorites.isEmpty)
+    }
+}
+
+@Suite @MainActor struct DeviceMoveTests {
+    @Test func cutThenPasteMovesItemsIntoTheOpenFolder() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("ROMs")
+        try writeFile(Parse.join(h.dev, "a.nsp"), "A")
+        try writeFile(Parse.join(h.dev, "b.nsp"), "B")
+        await h.open()
+
+        h.model.cutItems([h.item("a.nsp")!, h.item("b.nsp")!])
+        #expect(h.model.cutPaths.count == 2)
+        #expect(h.model.canPaste)
+        #expect(h.pasteboard.string(forType: .string) == "\(Parse.join(h.dev, "a.nsp"))\n\(Parse.join(h.dev, "b.nsp"))")
+
+        h.model.openDevice(h.item("ROMs")!)
+        await h.settle()
+        h.model.paste()
+        await waitUntil { h.model.deviceItems.count == 2 && h.model.activity == nil }
+        #expect(h.model.deviceItems.map(\.name) == ["a.nsp", "b.nsp"])
+        #expect(readFile(Parse.join(h.dev, "ROMs/a.nsp")) == "A")
+        #expect(!FileManager.default.fileExists(atPath: Parse.join(h.dev, "a.nsp")))
+        #expect(h.model.deviceSelection == Set(["a.nsp", "b.nsp"].map { Parse.join(h.dev, "ROMs/\($0)") }))
+        #expect(h.model.cutPaths.isEmpty)
+    }
+
+    @Test func copyingSomethingElseForgetsTheCut() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "a.nsp"), "A")
+        await h.open()
+        h.model.cutItems([h.item("a.nsp")!])
+        h.pasteboard.clearContents()
+        h.pasteboard.setString("something else", forType: .string)
+        #expect(!h.model.canPaste)
+        h.model.paste()
+        #expect(h.model.cutPaths.isEmpty)
+        #expect(h.item("a.nsp") != nil)
+    }
+
+    @Test func clashesAskThenReplaceOrSkip() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("ROMs")
+        try writeFile(Parse.join(h.dev, "ROMs/a.nsp"), "old")
+        try writeFile(Parse.join(h.dev, "a.nsp"), "new")
+        try writeFile(Parse.join(h.dev, "b.nsp"), "B")
+        await h.open()
+
+        await h.model.move([h.item("a.nsp")!, h.item("b.nsp")!], to: Parse.join(h.dev, "ROMs"))
+        let asked = try #require(h.model.pendingMove)
+        #expect(asked.clashes == ["a.nsp"])
+        #expect(readFile(Parse.join(h.dev, "ROMs/a.nsp")) == "old", "nothing moved before answering")
+
+        await h.model.resolve(asked, replace: false)
+        #expect(readFile(Parse.join(h.dev, "ROMs/a.nsp")) == "old")
+        #expect(readFile(Parse.join(h.dev, "ROMs/b.nsp")) == "B")
+        #expect(h.item("a.nsp") != nil && h.item("b.nsp") == nil)
+
+        await h.model.move([h.item("a.nsp")!], to: Parse.join(h.dev, "ROMs"))
+        await h.model.resolve(try #require(h.model.pendingMove), replace: true)
+        #expect(readFile(Parse.join(h.dev, "ROMs/a.nsp")) == "new")
+        #expect(h.model.deviceItems.map(\.name) == ["ROMs"])
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: Parse.join(h.dev, "ROMs"))
+        #expect(leftovers.sorted() == ["a.nsp", "b.nsp"], "no hidden leftovers")
+    }
+
+    @Test func aFolderCantGoIntoItself() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("ROMs/switch")
+        await h.open()
+        await h.model.move([h.item("ROMs")!], to: Parse.join(h.dev, "ROMs/switch"))
+        #expect(h.model.alertMessage == "“ROMs” can’t be moved into itself.")
+        #expect(FileManager.default.fileExists(atPath: Parse.join(h.dev, "ROMs/switch")))
+    }
+
+    @Test func optionDragCopiesAndKeepsTheOriginal() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("Backup")
+        try h.mkdir("Saves/zelda")
+        try writeFile(Parse.join(h.dev, "Saves/zelda/slot1.sav"), "S")
+        await h.open()
+        await h.model.move([h.item("Saves")!], to: Parse.join(h.dev, "Backup"), copy: true)
+        #expect(readFile(Parse.join(h.dev, "Backup/Saves/zelda/slot1.sav")) == "S")
+        #expect(readFile(Parse.join(h.dev, "Saves/zelda/slot1.sav")) == "S")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: Parse.join(h.dev, "Backup")) == ["Saves"])
+    }
+
+    @Test func duplicateNamesCopiesLikeFinderAndSelectsThem() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "game.nsp"), "G")
+        try h.mkdir("ROMs")
+        await h.open()
+
+        await h.model.duplicate([h.item("game.nsp")!, h.item("ROMs")!])
+        #expect(h.model.deviceItems.map(\.name) == ["ROMs", "ROMs copy", "game copy.nsp", "game.nsp"])
+        #expect(h.model.deviceSelection == [Parse.join(h.dev, "ROMs copy"), Parse.join(h.dev, "game copy.nsp")])
+
+        await h.model.duplicate([h.item("game.nsp")!])
+        await h.model.duplicate([h.item("game copy.nsp")!])
+        #expect(h.item("game copy 2.nsp") != nil && h.item("game copy 3.nsp") != nil)
+        #expect(readFile(Parse.join(h.dev, "game copy 3.nsp")) == "G")
+    }
+
+    @Test func droppingFinderFilesOnAFolderRowCopiesIntoIt() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("ROMs")
+        let src = h.mac.appendingPathComponent("x.nsp")
+        try writeFile(src.path, "X")
+        await h.open()
+        #expect(h.model.dropOnDevice([src], into: Parse.join(h.dev, "ROMs")))
+        await waitUntil { h.model.queue.items.count == 1 }
+        await h.idle()
+        #expect(readFile(Parse.join(h.dev, "ROMs/x.nsp")) == "X")
+        #expect(h.item("x.nsp") == nil)
+    }
+}
+
+@Suite @MainActor struct FinderActionTests {
+    @Test func newFolderIsUntitledSelectedAndReadyToRename() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        await h.open()
+        await h.model.newFolder()
+        let first = Parse.join(h.dev, "untitled folder")
+        #expect(h.item("untitled folder")?.isDirectory == true)
+        #expect(h.model.deviceSelection == [first])
+        #expect(h.model.renamingPath == first)
+
+        await h.model.newFolder()
+        #expect(h.item("untitled folder 2") != nil)
+    }
+
+    @Test func renameKeepsTheItemSelected() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "a.txt"), "a")
+        await h.open()
+        h.model.deviceSelection = [Parse.join(h.dev, "a.txt")]
+        await h.model.rename(h.item("a.txt")!, to: "b.txt")
+        #expect(h.model.deviceSelection == [Parse.join(h.dev, "b.txt")])
+    }
+
+    @Test func getInfoCountsAndSizesFolders() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("ROMs/switch")
+        try writeFile(Parse.join(h.dev, "ROMs/switch/a.nsp"), String(repeating: "x", count: 5000))
+        try writeFile(Parse.join(h.dev, "ROMs/b.nsp"), "b")
+        try writeFile(Parse.join(h.dev, "c.txt"), "hello")
+        await h.open()
+
+        h.model.getInfo([h.item("ROMs")!])
+        #expect(h.model.info?.loading == true)
+        await waitUntil { h.model.info?.loading == false }
+        #expect(h.model.info?.count == 3, "switch, a.nsp and b.nsp, like Finder’s “Contains”")
+        #expect((h.model.info?.size ?? 0) >= 5000)
+
+        h.model.getInfo([h.item("c.txt")!])
+        await waitUntil { h.model.info?.loading == false }
+        #expect(h.model.info?.size == 5 && h.model.info?.count == 1)
+    }
+
+    @Test func copyPathPutsDevicePathsOnTheClipboard() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "a.txt"), "a")
+        await h.open()
+        h.model.copyPaths([h.item("a.txt")!])
+        #expect(h.pasteboard.string(forType: .string) == Parse.join(h.dev, "a.txt"))
+        h.model.copyPaths([])
+        #expect(h.pasteboard.string(forType: .string) == h.dev)
+    }
+
+    @Test func quickLookSkipsFoldersAndRefusesHugeFiles() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "a.jpg"), "jpg")
+        try h.mkdir("ROMs")
+        await h.open()
+        var shown: [URL] = []
+        h.model.preview([h.item("a.jpg")!, h.item("ROMs")!]) { shown = $0 }
+        await waitUntil { !shown.isEmpty }
+        #expect(shown.map(\.lastPathComponent) == ["a.jpg"])
+
+        let huge = FileItem(name: "big.iso", path: Parse.join(h.dev, "big.iso"), isDirectory: false, size: 7 << 30, modified: nil)
+        h.model.preview([huge]) { _ in Issue.record("shouldn't pull a 7 GB file to preview it") }
+        #expect(h.model.alertMessage?.contains("too big to preview") == true)
+    }
+
+    @Test func finishedCopiesNotifyWhileAway() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        let src = h.mac.appendingPathComponent("x.nsp")
+        try writeFile(src.path, "X")
+        await h.open()
+        h.model.copyToDevice([src])
+        await waitUntil { h.model.queue.items.count == 1 }
+        await h.idle()
+        #expect(h.notifications.count == 1)
+        #expect(h.notifications.first?.0 == "Copying finished")
+        #expect(h.notifications.first?.1 == "“x.nsp” was copied to the device.")
+    }
+
+    @Test func batchNotificationSummarisesSuccessesAndFailures() {
+        func t(_ name: String, _ dir: Transfer.Direction = .toDevice, label: String? = nil) -> Transfer {
+            let t = Transfer(direction: dir, serial: "s", source: "/a/\(name)", destDir: "/b", name: name, isDirectory: false, replace: false)
+            t.destLabel = label
+            return t
+        }
+        let both = AppModel.batchNotification(done: [t("a"), t("b")], failed: [t("c")])
+        #expect(both?.0 == "Copying finished with problems")
+        #expect(both?.1 == "2 items were copied to the device. “c” couldn’t be copied.")
+        #expect(AppModel.batchNotification(done: [t("a", .toMac)], failed: [])?.1 == "“a” was copied to the Mac.")
+        #expect(AppModel.batchNotification(done: [t("a", .toMac, label: "Quick Look")], failed: []) == nil)
+    }
+}
+
+@Suite @MainActor struct StandardFavoritesTests {
+    @Test func aNewDeviceStartsWithTheUsualFoldersItHas() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        let root = try h.fake.deviceDir("storage")
+        h.fake.adb.storageRoot = root
+        let phone = Parse.join(root, "emulated/0"), card = Parse.join(root, "AAAA-1111")
+        for path in ["emulated/0/Download", "emulated/0/DCIM", "emulated/0/Music", "emulated/0/Android", "AAAA-1111/ROMs"] {
+            try FileManager.default.createDirectory(atPath: Parse.join(root, path), withIntermediateDirectories: true)
+        }
+        h.model.device = nil
+        await h.model.pollDevices()
+        #expect(h.model.favorites.map(\.path) == [Parse.join(card, "ROMs"), Parse.join(phone, "Download"),
+                                                  Parse.join(phone, "DCIM"), Parse.join(phone, "Music")])
+
+        // They're ordinary favourites: removing one sticks, and nothing is added back.
+        h.model.removeFromSidebar(h.model.favorites[1])
+        h.model.device = nil
+        await h.model.pollDevices()
+        #expect(h.model.favorites.map(\.name) == ["ROMs", "DCIM", "Music"])
+
+        for f in h.model.favorites { h.model.removeFromSidebar(f) }
+        h.model.device = nil
+        await h.model.pollDevices()
+        #expect(h.model.favorites.isEmpty, "an emptied sidebar stays empty")
     }
 }

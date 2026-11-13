@@ -77,3 +77,41 @@ import DroidCopyTestSupport
         #expect(Parse.join("/", "a") == "/a")
     }
 }
+
+@Suite struct NamingTests {
+    @Test func copyNamesFollowFinder() {
+        #expect(Parse.copyName("game.nsp", isDirectory: false, taken: []) == "game copy.nsp")
+        #expect(Parse.copyName("game.nsp", isDirectory: false, taken: ["game copy.nsp"]) == "game copy 2.nsp")
+        #expect(Parse.copyName("game copy.nsp", isDirectory: false, taken: ["game copy.nsp"]) == "game copy 2.nsp")
+        #expect(Parse.copyName("game copy 2.nsp", isDirectory: false, taken: ["game copy.nsp", "game copy 2.nsp"]) == "game copy 3.nsp")
+        #expect(Parse.copyName("v1.2", isDirectory: true, taken: []) == "v1.2 copy", "folders keep their dots")
+        #expect(Parse.copyName(".nomedia", isDirectory: false, taken: []) == ".nomedia copy")
+        #expect(Parse.copyName("README", isDirectory: false, taken: []) == "README copy")
+    }
+
+    @Test func untitledFoldersCountUp() {
+        #expect(Parse.untitledFolderName(taken: []) == "untitled folder")
+        #expect(Parse.untitledFolderName(taken: ["untitled folder", "untitled folder 2"]) == "untitled folder 3")
+    }
+
+    @Test func extensionsSplitLikeFinderSelectsThem() {
+        #expect(Parse.splitExtension("a.b.nsp", isDirectory: false) == ("a.b", "nsp"))
+        #expect(Parse.splitExtension(".nomedia", isDirectory: false) == (".nomedia", ""))
+        #expect(Parse.splitExtension("trailing.", isDirectory: false) == ("trailing.", ""))
+        #expect(Parse.splitExtension("ROMs.old", isDirectory: true) == ("ROMs.old", ""))
+    }
+
+    @Test func pathsInsideFolders() {
+        #expect(Parse.isSameOrInside("/s/ROMs/switch", "/s/ROMs"))
+        #expect(Parse.isSameOrInside("/s/ROMs", "/s/ROMs"))
+        #expect(!Parse.isSameOrInside("/s/ROMs2", "/s/ROMs"))
+        #expect(Parse.rebase("/s/ROMs/switch", from: "/s/ROMs", to: "/s/Games/ROMs") == "/s/Games/ROMs/switch")
+        #expect(Parse.rebase("/s/ROMs2", from: "/s/ROMs", to: "/x") == nil)
+        #expect(Parse.parent("/s/ROMs/a.nsp") == "/s/ROMs")
+    }
+
+    @Test func storagesUnderAnotherRoot() {
+        let roots = Parse.storages("AAAA-1111\nemulated\n", root: "/tmp/st")
+        #expect(roots.map(\.path) == ["/tmp/st/emulated/0", "/tmp/st/AAAA-1111"])
+    }
+}

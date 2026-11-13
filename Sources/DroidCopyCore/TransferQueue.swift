@@ -101,11 +101,28 @@ public final class TransferQueue: ObservableObject {
 
     public var hasActive: Bool { activeCount > 0 }
 
+    /// The transfers added since the queue was last idle.
+    public private(set) var batch: [Transfer] = []
+
+    /// How far the current batch has got: finished items, items in it (cancelled ones don't
+    /// count), and the fraction done, counting the running item's progress.
+    public var batchProgress: (finished: Int, count: Int, fraction: Double) {
+        let live = batch.filter { $0.state != .cancelled }
+        guard !live.isEmpty else { return (0, 0, 0) }
+        let finished = live.filter(\.state.isFinished).count
+        let done = live.reduce(0.0) { $0 + ($1.state.isFinished ? 1 : $1.fraction) }
+        return (finished, live.count, done / Double(live.count))
+    }
+
     public func add(_ transfers: [Transfer]) {
         guard !transfers.isEmpty else { return }
         // A new batch after the queue went idle drops the finished items, but failures stay until
         // they are retried or cleared.
-        if activeCount == 0 { items.removeAll { $0.state.isFinished && !$0.state.isFailed } }
+        if activeCount == 0 {
+            items.removeAll { $0.state.isFinished && !$0.state.isFailed }
+            batch = []
+        }
+        batch.append(contentsOf: transfers)
         items.append(contentsOf: transfers)
         updateActive()
         pump()
@@ -157,6 +174,9 @@ public final class TransferQueue: ObservableObject {
         guard t.state.isFinished else { return }
         let copy = t.retryCopy()
         if let i = items.firstIndex(where: { $0 === t }) {
+            if activeCount == 0 { batch = [] }
+            batch.removeAll { $0 === t }
+            batch.append(copy)
             items[i] = copy
             updateActive()
             pump()

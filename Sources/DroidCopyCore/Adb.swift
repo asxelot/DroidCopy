@@ -4,6 +4,10 @@ public struct AdbError: LocalizedError {
     public let message: String
     public init(_ message: String) { self.message = message }
     public var errorDescription: String? { message }
+
+    public static let notRespondingMessage = "The device isn’t responding."
+    /// adb was still waiting for the device when its time ran out.
+    public static let notResponding = AdbError(notRespondingMessage)
 }
 
 public struct RunResult: Sendable {
@@ -12,6 +16,10 @@ public struct RunResult: Sendable {
     public let status: Int32
 
     public var ok: Bool { status == 0 }
+
+    /// The status of a command that was stopped because it took too long.
+    public static let timedOutStatus: Int32 = -2
+    public var timedOut: Bool { status == Self.timedOutStatus }
 
     /// The most useful single line to show a person when the command failed.
     public var message: String {
@@ -26,6 +34,20 @@ public struct RunResult: Sendable {
 }
 
 private final class DataBox: @unchecked Sendable { var data = Data() }
+
+/// Resumes a continuation once, whichever of "finished" and "timed out" comes first.
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<RunResult, Never>?
+    init(_ cont: CheckedContinuation<RunResult, Never>) { self.cont = cont }
+    func resume(_ r: RunResult) {
+        lock.lock()
+        let c = cont
+        cont = nil
+        lock.unlock()
+        c?.resume(returning: r)
+    }
+}
 
 public final class Adb: @unchecked Sendable {
     public let path: String
@@ -47,8 +69,13 @@ public final class Adb: @unchecked Sendable {
     }
 
     /// Runs adb to completion. `onStart` receives the process so callers can terminate it.
-    public func run(_ args: [String], onStart: (@Sendable (Process) -> Void)? = nil) async -> RunResult {
+    /// With a `timeout`, a command still running after that many seconds is stopped and reported
+    /// as `timedOut`, so a device that stops answering can't leave the app waiting forever. Only
+    /// this adb client process is stopped; the adb server and the device are left alone.
+    public func run(_ args: [String], timeout: TimeInterval? = nil,
+                    onStart: (@Sendable (Process) -> Void)? = nil) async -> RunResult {
         await withCheckedContinuation { cont in
+            let once = ResumeOnce(cont)
             DispatchQueue.global(qos: .userInitiated).async {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: self.path)
@@ -58,10 +85,19 @@ public final class Adb: @unchecked Sendable {
                 p.standardError = err
                 p.standardInput = FileHandle.nullDevice
                 do { try p.run() } catch {
-                    cont.resume(returning: RunResult(output: "", error: error.localizedDescription, status: -1))
+                    once.resume(RunResult(output: "", error: error.localizedDescription, status: -1))
                     return
                 }
                 onStart?(p)
+                if let timeout {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                        guard p.isRunning else { return }
+                        p.terminate()
+                        // Don't wait for its output to close: something it started may hold it open.
+                        once.resume(RunResult(output: "", error: AdbError.notRespondingMessage,
+                                              status: RunResult.timedOutStatus))
+                    }
+                }
                 let errBox = DataBox()
                 let group = DispatchGroup()
                 group.enter()
@@ -72,7 +108,7 @@ public final class Adb: @unchecked Sendable {
                 let outData = out.fileHandleForReading.readDataToEndOfFile()
                 group.wait()
                 p.waitUntilExit()
-                cont.resume(returning: RunResult(
+                once.resume(RunResult(
                     output: String(decoding: outData, as: UTF8.self),
                     error: String(decoding: errBox.data, as: UTF8.self),
                     status: p.terminationStatus))
@@ -80,12 +116,18 @@ public final class Adb: @unchecked Sendable {
         }
     }
 
+    /// How long a quick question to the device (a listing, free space, whether a name is taken)
+    /// may take before the device counts as not responding.
+    public var quickTimeout: TimeInterval = 20
+    /// The same for slow questions, like the size of a big folder.
+    public var slowTimeout: TimeInterval = 120
+
     public func devices() async -> [DeviceInfo] {
-        Parse.devices(await run(["devices", "-l"]).output)
+        Parse.devices(await run(["devices", "-l"], timeout: quickTimeout).output)
     }
 
-    public func shell(_ serial: String, _ command: String) async -> RunResult {
-        await run(["-s", serial, "shell", command])
+    public func shell(_ serial: String, _ command: String, timeout: TimeInterval? = nil) async -> RunResult {
+        await run(["-s", serial, "shell", command], timeout: timeout)
     }
 
     /// Flushes the device's write cache to its storage, so nothing written is lost if the device
@@ -100,36 +142,47 @@ public final class Adb: @unchecked Sendable {
             [ -d \(q) ] || { echo 'Folder not found on the device' >&2; exit 2; }; \
             ls -A \(q) >/dev/null 2>&1 || { echo 'The device doesn’t allow reading this folder' >&2; exit 3; }; \
             find \(q) -mindepth 1 -maxdepth 1 -exec stat -L -c '%F/%s/%Y/%n' {} + 2>/dev/null; true
-            """)
+            """, timeout: quickTimeout)
+        if r.timedOut { throw AdbError.notResponding }
         guard r.ok else { throw AdbError(r.message) }
         return Parse.listing(r.output, showHidden: showHidden)
     }
 
+    /// Where Android mounts internal storage and cards. A temp folder in tests.
+    public var storageRoot = "/storage"
+
     public func storages(_ serial: String) async -> [StorageRoot] {
-        Parse.storages(await shell(serial, "ls /storage").output)
+        Parse.storages(await shell(serial, "ls \(Parse.shellQuote(storageRoot))", timeout: quickTimeout).output, root: storageRoot)
     }
 
     public func freeBytes(_ serial: String, _ dir: String) async -> Int64? {
-        Parse.dfAvailableBytes(await shell(serial, "df -k \(Parse.shellQuote(dir))").output)
+        Parse.dfAvailableBytes(await shell(serial, "df -k \(Parse.shellQuote(dir))", timeout: quickTimeout).output)
     }
 
     /// Size in bytes of a file, or disk usage of a folder. nil if it doesn't exist.
     /// Follows a symlink at `path`, like adb push/pull do.
     public func size(_ serial: String, _ path: String) async -> Int64? {
         let q = Parse.shellQuote(path)
-        let r = await shell(serial, "if [ -d \(q) ]; then echo D $(du -skH \(q) | cut -f1); elif [ -e \(q) ]; then echo F $(stat -L -c %s \(q)); fi")
+        let r = await shell(serial, "if [ -d \(q) ]; then echo D $(du -skH \(q) | cut -f1); elif [ -e \(q) ]; then echo F $(stat -L -c %s \(q)); fi", timeout: slowTimeout)
         return Parse.size(r.output)
     }
 
+    /// How many items are inside a folder, at every depth. nil if that couldn't be counted.
+    public func itemCount(_ serial: String, _ path: String) async -> Int? {
+        let r = await shell(serial, "find \(Parse.shellQuote(path)) -mindepth 1 | wc -l", timeout: slowTimeout)
+        guard r.ok else { return nil }
+        return Int(r.output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     public func exists(_ serial: String, _ path: String) async -> Bool {
-        await shell(serial, "[ -e \(Parse.shellQuote(path)) ] && echo yes").output.contains("yes")
+        await shell(serial, "[ -e \(Parse.shellQuote(path)) ] && echo yes", timeout: quickTimeout).output.contains("yes")
     }
 
     /// Which of `names` already exist in `dir`, checked in one round trip.
     public func existingNames(_ serial: String, in dir: String, _ names: [String]) async -> Set<String> {
         guard !names.isEmpty else { return [] }
         let list = names.map(Parse.shellQuote).joined(separator: " ")
-        let r = await shell(serial, "cd \(Parse.shellQuote(dir)) || exit 1; for n in \(list); do [ -e \"$n\" ] && printf '%s\\n' \"$n\"; done; true")
+        let r = await shell(serial, "cd \(Parse.shellQuote(dir)) || exit 1; for n in \(list); do [ -e \"$n\" ] && printf '%s\\n' \"$n\"; done; true", timeout: quickTimeout)
         let found = Set(r.output.split(separator: "\n").map(String.init))
         return found.intersection(names)
     }
@@ -145,9 +198,39 @@ public final class Adb: @unchecked Sendable {
         await shell(serial, "mkdir \(Parse.shellQuote(path))")
     }
 
-    public func move(_ serial: String, from: String, to: String) async -> RunResult {
-        let t = Parse.shellQuote(to)
-        return await shell(serial, "if [ -e \(t) ]; then echo 'An item with that name already exists' >&2; exit 1; fi; mv \(Parse.shellQuote(from)) \(t)")
+    /// Moves or renames an item on the device. Without `replace` it fails if `to` exists; with it,
+    /// the old item at `to` is kept aside until the move worked.
+    public func move(_ serial: String, from: String, to: String, replace: Bool = false) async -> RunResult {
+        if replace { return await swapIn(serial, from, as: to, aside: Self.asidePath(for: to)) }
+        let (f, t) = (Parse.shellQuote(from), Parse.shellQuote(to))
+        let tmp = Parse.shellQuote(Self.asidePath(for: from) + "-rename")
+        // SD cards ignore case, so "ROMs" -> "Roms" finds "Roms" already there: it's the same
+        // item. Rename it through a temporary name instead of refusing.
+        return await shell(serial, """
+            if [ -e \(t) ]; then
+              if [ \(f) -ef \(t) ]; then mv \(f) \(tmp) && mv \(tmp) \(t); exit; fi
+              echo 'An item with that name already exists' >&2; exit 1
+            fi
+            mv \(f) \(t)
+            """)
+    }
+
+    /// Copies an item to `to` on the device. Like copies from the Mac, it's written under a hidden
+    /// name first and only renamed into place once complete, so a failed copy leaves nothing
+    /// under the real name. `replace` works as for `move`.
+    public func copy(_ serial: String, from: String, to: String, replace: Bool = false) async -> RunResult {
+        let dir = Parse.parent(to), name = (to as NSString).lastPathComponent
+        let staging = Parse.join(dir, ".dc~" + name)
+        let (f, s) = (Parse.shellQuote(from), Parse.shellQuote(staging))
+        let r = await shell(serial, "rm -rf \(s); cp -R \(f) \(s) || { rm -rf \(s); exit 1; }")
+        guard r.ok else { return r }
+        let placed = await move(serial, from: staging, to: to, replace: replace)
+        if !placed.ok { _ = await delete(serial, staging) }
+        return placed
+    }
+
+    static func asidePath(for path: String) -> String {
+        Parse.join(Parse.parent(path), ".dc-old~" + (path as NSString).lastPathComponent)
     }
 
     public func delete(_ serial: String, _ path: String) async -> RunResult {

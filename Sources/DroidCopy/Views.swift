@@ -3,14 +3,40 @@ import SwiftUI
 import UniformTypeIdentifiers
 import DroidCopyCore
 
+/// Window-level UI state: dialogs, and which bars are shown. Shared with the menu commands.
+/// (An ObservableObject because `@State` needs a macro plugin the Command Line Tools lack.)
+@MainActor
+final class WindowState: ObservableObject {
+    @Published var deleting: [FileItem] = []
+    @Published var goingToFolder = false
+    @Published var goToPath = ""
+    @Published var showPathBar: Bool { didSet { defaults.set(showPathBar, forKey: "showPathBar") } }
+    @Published var showStatusBar: Bool { didSet { defaults.set(showStatusBar, forKey: "showStatusBar") } }
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        showPathBar = defaults.object(forKey: "showPathBar") as? Bool ?? true
+        showStatusBar = defaults.object(forKey: "showStatusBar") as? Bool ?? true
+    }
+}
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var ui: WindowState
 
     var body: some View {
-        MainLayout(queue: model.queue)
-        .frame(minWidth: 520, minHeight: 460)
-        .navigationTitle(model.device.map { "DroidCopy — \($0.displayName)" } ?? "DroidCopy")
+        NavigationSplitView {
+            Sidebar(queue: model.queue)
+                .navigationSplitViewColumnWidth(min: 150, ideal: 190, max: 320)
+        } detail: {
+            BrowserView(queue: model.queue)
+                .navigationSplitViewColumnWidth(min: 420, ideal: 860)
+        }
+        .navigationTitle(model.folderTitle)
+        .toolbar { BrowserToolbar() }
+        .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search")
+        .frame(minWidth: 680, minHeight: 440)
         .confirmationDialog(
             conflictTitle,
             isPresented: Binding(get: { model.pending != nil }, set: { if !$0 { model.pending = nil } }),
@@ -23,9 +49,31 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: { batch in
-            let names = batch.conflicts.prefix(6).map(\.name).joined(separator: "\n")
-            let more = batch.conflicts.count > 6 ? "\n…and \(batch.conflicts.count - 6) more" : ""
-            Text(names + more)
+            Text(Self.nameList(batch.conflicts.map(\.name)))
+        }
+        .confirmationDialog(
+            moveTitle,
+            isPresented: Binding(get: { model.pendingMove != nil }, set: { if !$0 { model.pendingMove = nil } }),
+            titleVisibility: .visible,
+            presenting: model.pendingMove
+        ) { move in
+            Button("Replace") { Task { await model.resolve(move, replace: true) } }
+            if move.clashes.count < move.items.count {
+                Button("Skip Existing") { Task { await model.resolve(move, replace: false) } }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { move in
+            Text(Self.nameList(move.clashes))
+        }
+        .confirmationDialog(
+            ui.deleting.count == 1 ? "Delete “\(ui.deleting[0].name)” from the device?" : "Delete \(ui.deleting.count) items from the device?",
+            isPresented: Binding(get: { !ui.deleting.isEmpty }, set: { if !$0 { ui.deleting = [] } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) { let items = ui.deleting; Task { await model.delete(items) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Android has no Trash, so this can’t be undone.")
         }
         .alert(
             "Something went wrong",
@@ -34,24 +82,255 @@ struct ContentView: View {
         ) { _ in
             Button("OK") {}
         } message: { Text($0) }
+        .sheet(item: $model.info) { info in
+            InfoSheet(info: info) { model.info = nil }
+        }
+        .sheet(isPresented: $ui.goingToFolder) {
+            GoToFolderSheet()
+        }
     }
 
     private var conflictTitle: String {
         let n = model.pending?.conflicts.count ?? 0
         return n == 1 ? "This item already exists. Replace it?" : "\(n) items already exist. Replace them?"
     }
+
+    private var moveTitle: String {
+        guard let move = model.pendingMove else { return "" }
+        let folder = (move.destDir as NSString).lastPathComponent
+        return move.clashes.count == 1
+            ? "An item named “\(move.clashes[0])” already exists in “\(folder)”. Replace it?"
+            : "\(move.clashes.count) items already exist in “\(folder)”. Replace them?"
+    }
+
+    static func nameList(_ names: [String]) -> String {
+        let shown = names.prefix(6).joined(separator: "\n")
+        return names.count > 6 ? shown + "\n…and \(names.count - 6) more" : shown
+    }
 }
 
-/// The device pane, plus the transfer list while copying has taken more than a moment, or while
-/// failed items wait to be retried or cleared.
-struct MainLayout: View {
+// MARK: - Toolbar
+
+struct BrowserToolbar: ToolbarContent {
+    @EnvironmentObject var model: AppModel
+
+    var body: some ToolbarContent {
+        ToolbarItemGroup(placement: .navigation) {
+            Button { model.goBack() } label: { Label("Back", systemImage: "chevron.left") }
+                .disabled(!model.canGoBack)
+                .help("See folders you viewed previously")
+            Button { model.goForward() } label: { Label("Forward", systemImage: "chevron.right") }
+                .disabled(!model.canGoForward)
+                .help("See folders you viewed next")
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button { Task { await model.newFolder() } } label: { Label("New Folder", systemImage: "folder.badge.plus") }
+                .disabled(model.device == nil)
+                .help("New Folder")
+            ActionMenu()
+        }
+    }
+}
+
+/// Finder's Action (…) button: what you can do with the selection.
+struct ActionMenu: View {
+    @EnvironmentObject var model: AppModel
+    @EnvironmentObject var ui: WindowState
+
+    var body: some View {
+        let items = model.selectedItems
+        Menu {
+            Button("New Folder") { Task { await model.newFolder() } }
+            Divider()
+            Button("Open") { model.openSelection() }.disabled(items.isEmpty)
+            Button("Get Info") { model.getInfo(items) }
+            Button("Rename") { model.renamingPath = items.first?.path }.disabled(items.count != 1)
+            Button("Duplicate") { Task { await model.duplicate(items) } }.disabled(items.isEmpty)
+            Divider()
+            Button("Copy to Mac…") { model.copyToMac(items) }.disabled(items.isEmpty)
+            Button("Copy Path") { model.copyPaths(items) }
+            Button("Add to Sidebar") { model.addToSidebar(items) }
+            Divider()
+            Button("Delete…") { ui.deleting = items }.disabled(items.isEmpty)
+        } label: {
+            Label("Action", systemImage: "ellipsis.circle")
+        }
+        .disabled(model.device == nil)
+        .help("Perform tasks with the selected items")
+    }
+}
+
+// MARK: - Sidebar
+
+struct Sidebar: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var queue: TransferQueue
+
+    var body: some View {
+        List(selection: Binding(get: { model.sidebarSelection }, set: { if let path = $0 { model.goDevice(path) } })) {
+            if let device = model.device {
+                Section("Favourites") {
+                    if model.favorites.isEmpty {
+                        Text("Right-click a folder and choose Add to Sidebar")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    ForEach(model.favorites) { f in
+                        Label(f.name, systemImage: Self.symbol(forFavorite: f))
+                            .tag(f.path)
+                            .help(f.path)
+                            .contextMenu {
+                                Button("Open") { model.goDevice(f.path) }
+                                Button("Remove from Sidebar") { model.removeFromSidebar(f) }
+                            }
+                            .onDrop(of: SidebarDrop.types, isTargeted: nil) { SidebarDrop.handle($0, into: f.path, model: model) }
+                    }
+                    .onMove { model.moveFavorites(from: $0, to: $1) }
+                }
+                Section {
+                    ForEach(model.storages) { s in
+                        Label(s.name, systemImage: Self.symbol(for: s))
+                            .tag(s.path)
+                            .help(s.path)
+                            .onDrop(of: SidebarDrop.types, isTargeted: nil) { SidebarDrop.handle($0, into: s.path, model: model) }
+                    }
+                } header: {
+                    HStack {
+                        Text(device.displayName)
+                        Spacer()
+                        EjectButton(queue: queue)
+                    }
+                }
+            } else {
+                Section("Locations") {
+                    Label(model.ejectedSerial != nil ? "Ejected" : "No Device",
+                          systemImage: model.ejectedSerial != nil ? "eject" : "cable.connector.slash")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .listStyle(.sidebar)
+    }
+
+    /// Finder's sidebar icons for the standard folders; a plain folder for anything else.
+    static func symbol(forFavorite f: Favorite) -> String {
+        switch f.name.lowercased() {
+        case "download", "downloads": return "arrow.down.circle"
+        case "documents": return "doc"
+        case "dcim": return "camera"
+        case "pictures": return "photo"
+        case "movies": return "film"
+        case "music": return "music.note"
+        case "roms": return "gamecontroller"
+        default: return "folder"
+        }
+    }
+
+    static func symbol(for storage: StorageRoot) -> String {
+        storage.name.hasPrefix("SD") ? "sdcard" : "internaldrive"
+    }
+}
+
+/// Drops onto a sidebar location: device items move there (copy with ⌥), Finder files copy there.
+@MainActor
+enum SidebarDrop {
+    static let types: [UTType] = [.droidcopyItems, .fileURL]
+
+    private final class Collected: @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var items: [DraggedItem] = []
+        private(set) var urls: [URL] = []
+        func add(_ item: DraggedItem) { lock.lock(); items.append(item); lock.unlock() }
+        func add(_ url: URL) { lock.lock(); urls.append(url); lock.unlock() }
+    }
+
+    static func handle(_ providers: [NSItemProvider], into dir: String, model: AppModel) -> Bool {
+        let copy = NSEvent.modifierFlags.contains(.option)
+        let collected = Collected()
+        let group = DispatchGroup()
+        let internalID = UTType.droidcopyItems.identifier
+        let fromDevice = providers.filter { $0.hasItemConformingToTypeIdentifier(internalID) }
+        if !fromDevice.isEmpty {
+            for p in fromDevice {
+                group.enter()
+                p.loadDataRepresentation(forTypeIdentifier: internalID) { data, _ in
+                    if let data, let item = try? JSONDecoder().decode(DraggedItem.self, from: data) { collected.add(item) }
+                    group.leave()
+                }
+            }
+            group.notify(queue: .main) {
+                let items = collected.items.map(\.fileItem)
+                Task { @MainActor in await model.move(items, to: dir, copy: copy) }
+            }
+            return true
+        }
+        let files = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        guard !files.isEmpty else { return false }
+        for p in files {
+            group.enter()
+            _ = p.loadObject(ofClass: URL.self) { url, _ in
+                if let url { collected.add(url) }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            MainActor.assumeIsolated { _ = model.dropOnDevice(collected.urls, into: dir) }
+        }
+        return true
+    }
+}
+
+/// Ejects the device; unavailable while copies or a delete/move run, since ejecting would cut them off.
+struct EjectButton: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var queue: TransferQueue
+
+    var body: some View {
+        Group {
+            if model.ejecting {
+                ProgressView().controlSize(.mini)
+            } else {
+                Button { Task { await model.eject() } } label: {
+                    Image(systemName: "eject")
+                }
+                .buttonStyle(.borderless)
+                .disabled(queue.hasActive || model.activity != nil)
+                .help(queue.hasActive ? "Wait for the copies to finish before ejecting" : "Eject: make the device safe to unplug")
+                .accessibilityLabel("Eject")
+            }
+        }
+    }
+}
+
+// MARK: - Browser
+
+/// The folder, Finder's path and status bars, and the transfer list while copying has taken
+/// more than a moment, or while failed items wait to be retried or cleared.
+struct BrowserView: View {
+    @EnvironmentObject var model: AppModel
+    @EnvironmentObject var ui: WindowState
     @ObservedObject var queue: TransferQueue
     static let transferShare: CGFloat = 0.5
 
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
-                DevicePane().frame(maxHeight: .infinity)
+                FolderView().frame(maxHeight: .infinity)
+                if model.device != nil {
+                    if ui.showPathBar {
+                        Divider()
+                        PathBar(crumbs: model.deviceCrumbs, storageSymbol: model.storage.map(Sidebar.symbol(for:)) ?? "internaldrive")
+                    }
+                    if ui.showStatusBar {
+                        Divider()
+                        Text(model.statusText)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 22)
+                    }
+                }
                 if queue.showsProgress || queue.failedCount > 0 {
                     Divider()
                     // As tall as its rows, but never more than half the window.
@@ -63,160 +342,158 @@ struct MainLayout: View {
     }
 }
 
-// MARK: - Device pane
-
-/// Ejects the device; unavailable while copies are running, since ejecting would cut them off.
-struct EjectButton: View {
+struct FolderView: View {
     @EnvironmentObject var model: AppModel
-    @ObservedObject var queue: TransferQueue
+    @EnvironmentObject var ui: WindowState
 
     var body: some View {
-        Button { Task { await model.eject() } } label: {
-            Label("Eject", systemImage: "eject")
-        }
-        .disabled(queue.hasActive || model.ejecting || model.deleteProgress != nil)
-        .help(queue.hasActive ? "Wait for the copies to finish before ejecting" : "Make the device safe to unplug")
-    }
-}
-
-final class DevicePaneState: ObservableObject {
-    @Published var creatingFolder = false
-    @Published var renaming: FileItem?
-    @Published var deleting: [FileItem] = []
-    @Published var newName = ""
-}
-
-struct DevicePane: View {
-    @EnvironmentObject var model: AppModel
-    @StateObject private var ui = DevicePaneState()
-
-    var body: some View {
-        VStack(spacing: 0) {
-            PaneHeader(title: model.device?.displayName ?? "Device", systemImage: "externaldrive.connected.to.line.below", free: model.deviceFree) {
-                if model.storages.count > 1 {
-                    Picker("Storage", selection: Binding(get: { model.storage }, set: { if let s = $0 { model.selectStorage(s) } })) {
-                        ForEach(model.storages) { Text($0.name).tag(Optional($0)) }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .fixedSize()
-                }
-                Button { ui.newName = "New Folder"; ui.creatingFolder = true } label: {
-                    Label("New Folder", systemImage: "folder.badge.plus")
-                }
-                .disabled(model.device == nil)
-                if model.device != nil {
-                    EjectButton(queue: model.queue)
+        if model.adbMissing {
+            ContentUnavailableView {
+                Label("adb Isn’t Installed", systemImage: "terminal")
+            } description: {
+                Text("DroidCopy needs adb to talk to your device.\nInstall it by running this command in Terminal:")
+            } actions: {
+                VStack(spacing: 10) {
+                    CopyableCommand(command: AppModel.adbInstallCommand)
+                    Text("Then quit and reopen DroidCopy.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
             }
-            if model.adbMissing {
-                ContentUnavailableView {
-                    Label("adb Isn’t Installed", systemImage: "terminal")
-                } description: {
-                    Text("DroidCopy needs adb to talk to your device.\nInstall it by running this command in Terminal:")
-                } actions: {
-                    VStack(spacing: 10) {
-                        CopyableCommand(command: AppModel.adbInstallCommand)
-                        Text("Then quit and reopen DroidCopy.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if model.device == nil {
+            ContentUnavailableView {
+                if model.ejectedSerial != nil {
+                    Label("Ejected", systemImage: "eject")
+                } else {
+                    Label("No Device", systemImage: "cable.connector.slash")
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if model.device == nil {
-                ContentUnavailableView {
-                    if model.ejectedSerial != nil {
-                        Label("Ejected", systemImage: "eject")
-                    } else {
-                        Label("No Device", systemImage: "cable.connector.slash")
-                    }
-                } description: {
-                    Text(model.deviceStatus)
-                } actions: {
-                    if model.ejectedSerial != nil {
-                        Button("Reconnect") { Task { await model.reconnect() } }
-                    }
+            } description: {
+                Text(model.deviceStatus)
+            } actions: {
+                if model.ejectedSerial != nil {
+                    Button("Reconnect") { Task { await model.reconnect() } }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                NavBar(canGoUp: model.deviceCanGoUp, up: model.deviceUp, crumbs: model.deviceCrumbs,
-                       refresh: { Task { await model.loadDevice() } })
-                Divider()
-                FileTable(
-                    items: model.deviceItems,
-                    selection: $model.deviceSelection,
-                    actions: FileTableActions(
-                        open: model.openDevice,
-                        copyToMac: model.copyToMac,
-                        copy: model.copyToClipboard,
-                        rename: { item in ui.newName = item.name; ui.renaming = item },
-                        delete: { items in ui.deleting = items },
-                        receive: { urls in _ = model.dropOnDevice(urls) },
-                        deliver: model.deliver
-                    )
-                )
-                .overlay {
-                    if let error = model.deviceError {
-                        ContentUnavailableView("Can’t open this folder", systemImage: "exclamationmark.triangle", description: Text(error))
-                    } else if model.deviceLoading && model.deviceItems.isEmpty {
-                        ProgressView()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            FileTable(
+                items: model.visibleItems,
+                selection: $model.deviceSelection,
+                dimmed: model.cutPaths,
+                renaming: model.renamingPath,
+                actions: actions
+            )
+            .overlay {
+                if let error = model.deviceError {
+                    ContentUnavailableView {
+                        Label("Can’t Open This Folder", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(error == AdbError.notRespondingMessage
+                             ? "\(error) It may still be finishing a big write. Wait a moment, then try again."
+                             : error)
+                    } actions: {
+                        Button("Try Again") { Task { await model.loadDevice() } }
                     }
+                } else if model.deviceLoading && model.deviceItems.isEmpty {
+                    ProgressView()
+                } else if !model.deviceLoading && model.deviceItems.isEmpty {
+                    Text("Drag files here from Finder, or paste them with ⌘V")
+                        .foregroundStyle(.secondary)
+                        .allowsHitTesting(false)
+                } else if model.visibleItems.isEmpty {
+                    ContentUnavailableView.search(text: model.searchText)
                 }
-                .overlay(alignment: .bottom) {
-                    if let progress = model.deleteProgress {
-                        DeleteStatus(progress: progress)
-                    } else if !model.deviceLoading && model.deviceError == nil {
-                        Text("Drag or paste files from Finder to copy them here · drag or copy items out to Finder")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(6)
-                            .allowsHitTesting(false)
-                    }
+            }
+            .overlay(alignment: .bottom) {
+                if let activity = model.activity {
+                    ActivityStatus(activity: activity)
                 }
             }
         }
-        .alert("New Folder", isPresented: $ui.creatingFolder) {
-            TextField("Name", text: $ui.newName)
-            Button("Create") { let name = ui.newName; Task { await model.makeFolder(name) } }
-            Button("Cancel", role: .cancel) {}
-        }
-        .alert("Rename",
-               isPresented: Binding(get: { ui.renaming != nil }, set: { if !$0 { ui.renaming = nil } }),
-               presenting: ui.renaming) { item in
-            TextField("Name", text: $ui.newName)
-            Button("Rename") { let name = ui.newName; Task { await model.rename(item, to: name) } }
-            Button("Cancel", role: .cancel) {}
-        }
-        .confirmationDialog(
-            ui.deleting.count == 1 ? "Delete “\(ui.deleting[0].name)” from the device?" : "Delete \(ui.deleting.count) items from the device?",
-            isPresented: Binding(get: { !ui.deleting.isEmpty }, set: { if !$0 { ui.deleting = [] } }),
-            titleVisibility: .visible
-        ) {
-            Button("Delete", role: .destructive) { let items = ui.deleting; Task { await model.delete(items) } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This can’t be undone.")
-        }
+    }
+
+    private var actions: FileTableActions {
+        let model = self.model
+        let ui = self.ui
+        return FileTableActions(
+            open: model.openDevice,
+            copyToMac: model.copyToMac,
+            copy: model.copyToClipboard,
+            cut: model.cutItems,
+            paste: model.paste,
+            canPaste: { model.canPaste },
+            rename: { item, name in Task { await model.rename(item, to: name) } },
+            renameStarted: { DispatchQueue.main.async { if model.renamingPath != nil { model.renamingPath = nil } } },
+            delete: { items in ui.deleting = items },
+            receive: { urls, folder in _ = model.dropOnDevice(urls, into: folder) },
+            move: { items, dir, copy in Task { await model.move(items, to: dir, copy: copy) } },
+            deliver: model.deliver,
+            preview: model.preview,
+            getInfo: model.getInfo,
+            duplicate: { items in Task { await model.duplicate(items) } },
+            addToSidebar: model.addToSidebar,
+            copyPath: model.copyPaths,
+            newFolder: { Task { await model.newFolder() } }
+        )
     }
 }
 
-/// "Deleting “x” · 2 of 5 · 14 s" with a bar for batches, over the bottom of the file list.
-struct DeleteStatus: View {
-    let progress: AppModel.DeleteProgress
+/// Finder's path bar: the storage and each folder down to the one shown. Click one to go there.
+struct PathBar: View {
+    let crumbs: [Crumb]
+    let storageSymbol: String
+    private static let folderIcon = NSWorkspace.shared.icon(for: .folder)
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                ForEach(Array(crumbs.enumerated()), id: \.offset) { index, crumb in
+                    if index > 0 {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    Button(action: crumb.action) {
+                        HStack(spacing: 4) {
+                            if crumb.isStorage {
+                                Image(systemName: storageSymbol).frame(width: 14)
+                            } else {
+                                Image(nsImage: Self.folderIcon).resizable().frame(width: 14, height: 14)
+                            }
+                            Text(crumb.title).lineLimit(1)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(index == crumbs.count - 1 ? .primary : .secondary)
+                    .help(crumb.path)
+                }
+            }
+            .padding(.horizontal, 10)
+        }
+        .font(.system(size: 11))
+        .frame(height: 24)
+    }
+}
+
+/// "Moving “x” · 2 of 5 · 14 s" with a bar for batches, over the bottom of the file list.
+struct ActivityStatus: View {
+    let activity: AppModel.DeviceActivity
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Deleting “\(progress.name)”").lineLimit(1).truncationMode(.middle)
+                Text("\(activity.verb) “\(activity.name)”").lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 8)
-                // Ticks every second, so a slow delete visibly hasn't stalled.
-                TimelineView(.periodic(from: progress.started, by: 1)) { context in
+                // Ticks every second, so a slow one visibly hasn't stalled.
+                TimelineView(.periodic(from: activity.started, by: 1)) { context in
                     Text(detail(at: context.date)).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
-            if progress.count > 1 {
-                ProgressView(value: Double(progress.index - 1), total: Double(progress.count)).progressViewStyle(.linear)
+            if activity.count > 1 {
+                ProgressView(value: Double(activity.index - 1), total: Double(activity.count)).progressViewStyle(.linear)
             }
         }
         .font(.callout)
@@ -229,67 +506,143 @@ struct DeleteStatus: View {
     }
 
     private func detail(at now: Date) -> String {
-        let seconds = Int(now.timeIntervalSince(progress.started))
+        let seconds = Int(now.timeIntervalSince(activity.started))
         let elapsed = seconds >= 2 ? Fmt.duration(Double(seconds)) : ""
-        let position = progress.count > 1 ? "\(progress.index) of \(progress.count)" : ""
+        let position = activity.count > 1 ? "\(activity.index) of \(activity.count)" : ""
         return [position, elapsed].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 
-// MARK: - Shared pieces
+// MARK: - Sheets
 
-struct PaneHeader<Trailing: View>: View {
-    let title: String
-    let systemImage: String
-    let free: Int64?
-    @ViewBuilder let trailing: () -> Trailing
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Label(title, systemImage: systemImage).font(.headline).lineLimit(1)
-            if let free {
-                Text("\(Fmt.bytes(free)) free").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer(minLength: 8)
-            trailing()
-        }
-        .padding(.horizontal, 10)
-        // Fixed, so both panes line up whatever controls they hold (a segmented picker is taller than a menu).
-        .frame(height: 40)
-    }
-}
-
-struct NavBar: View {
-    let canGoUp: Bool
-    let up: () -> Void
-    let crumbs: [Crumb]
-    let refresh: () -> Void
+/// Get Info: what Finder's info window shows that the device can tell us.
+struct InfoSheet: View {
+    let info: AppModel.ItemInfo
+    let done: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Button(action: up) { Image(systemName: "chevron.up") }
-                .disabled(!canGoUp)
-                .help("Enclosing folder")
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 3) {
-                    ForEach(Array(crumbs.enumerated()), id: \.offset) { index, crumb in
-                        if index > 0 {
-                            Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
-                        }
-                        Button(crumb.title, action: crumb.action)
-                            .foregroundStyle(index == crumbs.count - 1 ? .primary : .secondary)
-                    }
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image(nsImage: icon).resizable().frame(width: 48, height: 48)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.headline).lineLimit(2).truncationMode(.middle)
+                    Text(sizeText).foregroundStyle(.secondary)
                 }
             }
-            Button(action: refresh) { Image(systemName: "arrow.clockwise") }
-                .help("Refresh")
+            Divider()
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 6) {
+                if info.items.count == 1 {
+                    row("Kind:", info.items[0].kind)
+                }
+                row("Size:", sizeDetail)
+                if info.items.contains(where: \.isDirectory) {
+                    row("Contains:", info.loading ? "Counting…" : info.count.map { $0 == 1 ? "1 item" : "\($0) items" } ?? "Unknown")
+                }
+                GridRow {
+                    Text("Where:").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(whereText).textSelection(.enabled).lineLimit(3)
+                        CopyButton(text: whereText)
+                    }
+                }
+                if info.items.count == 1, let modified = info.items[0].modified {
+                    row("Modified:", Fmt.date(modified))
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Done", action: done).keyboardShortcut(.defaultAction)
+            }
         }
-        .buttonStyle(.borderless)
-        .padding(.horizontal, 10)
-        .padding(.bottom, 6)
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+            Text(value).textSelection(.enabled)
+        }
+    }
+
+    private var title: String {
+        info.items.count == 1 ? info.items[0].name : "\(info.items.count) items"
+    }
+
+    private var icon: NSImage {
+        info.items.count == 1 ? FileTable.Coordinator.icon(for: info.items[0]) : NSWorkspace.shared.icon(for: .data)
+    }
+
+    private var sizeText: String {
+        if info.loading { return "Calculating size…" }
+        return info.size.map(Fmt.bytes) ?? "Size unknown"
+    }
+
+    private var sizeDetail: String {
+        if info.loading { return "Calculating…" }
+        guard let size = info.size else { return "Unknown" }
+        let exact = size.formatted(.number)
+        let onDisk = info.items.contains(where: \.isDirectory) ? " on disk" : ""
+        return "\(Fmt.bytes(size)) (\(exact) bytes)\(onDisk)"
+    }
+
+    private var whereText: String {
+        info.items.count == 1 ? info.items[0].path : Parse.parent(info.items[0].path)
     }
 }
 
+/// A small copy-to-clipboard button that briefly shows a tick.
+struct CopyButton: View {
+    let text: String
+    @StateObject private var feedback = CopyFeedback()
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            feedback.copied = true
+            Task { @MainActor [feedback] in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                feedback.copied = false
+            }
+        } label: {
+            Image(systemName: feedback.copied ? "checkmark" : "doc.on.doc")
+        }
+        .buttonStyle(.borderless)
+        .help("Copy path")
+    }
+}
+
+/// ⇧⌘G, like Finder's Go to Folder.
+struct GoToFolderSheet: View {
+    @EnvironmentObject var model: AppModel
+    @EnvironmentObject var ui: WindowState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Go to Folder").font(.headline)
+            TextField("ROMs/switch or /storage/emulated/0/Download", text: $ui.goToPath)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 420)
+                .onSubmit(go)
+            Text("A path inside \(model.storage?.name ?? "the current storage"), or a full path.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { ui.goingToFolder = false }.keyboardShortcut(.cancelAction)
+                Button("Go", action: go).keyboardShortcut(.defaultAction)
+                    .disabled(ui.goToPath.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+    }
+
+    private func go() {
+        model.goToFolder(ui.goToPath)
+        ui.goingToFolder = false
+    }
+}
 
 // MARK: - Transfers
 
@@ -298,8 +651,11 @@ struct TransferList: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 10) {
                 Text("Transfers").font(.headline)
+                if queue.hasActive {
+                    BatchProgress(queue: queue)
+                }
                 Spacer()
                 Button("Clear Finished") { queue.clearFinished() }
                     .disabled(queue.items.isEmpty)
@@ -322,6 +678,26 @@ struct TransferList: View {
                 TransferRow(transfer: t, queue: queue)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
+            }
+        }
+    }
+}
+
+/// "3 of 7" and a bar for the whole batch, next to the Transfers heading.
+struct BatchProgress: View {
+    @ObservedObject var queue: TransferQueue
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+            let p = queue.batchProgress
+            if p.count > 1 {
+                HStack(spacing: 8) {
+                    Text("\(min(p.finished + 1, p.count)) of \(p.count)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                    ProgressView(value: p.fraction).progressViewStyle(.linear).frame(width: 140)
+                }
             }
         }
     }

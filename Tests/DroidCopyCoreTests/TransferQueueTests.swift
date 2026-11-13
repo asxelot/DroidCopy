@@ -465,3 +465,31 @@ import DroidCopyTestSupport
         #expect(!q.showsProgress, "hidden again once nothing is copying")
     }
 }
+
+@Suite @MainActor struct BatchProgressTests {
+    @Test func countsTheBatchAddedSinceTheQueueWasIdle() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let dev = try fake.deviceDir()
+        let mac = try fake.macDir()
+        let q = TransferQueue(adb: fake.adb)
+        func upload(_ name: String) throws -> Transfer {
+            let src = mac.appendingPathComponent(name)
+            try writeFile(src.path, "data")
+            return Transfer(direction: .toDevice, serial: "FAKE123", source: src.path, destDir: dev,
+                            name: name, isDirectory: false, replace: false)
+        }
+        #expect(q.batchProgress.count == 0)
+        q.add([try upload("a"), try upload("b"), try upload("c")])
+        #expect(q.batchProgress.count == 3)
+        await waitIdle(q)
+        #expect(q.batchProgress.finished == 3 && q.batchProgress.fraction == 1)
+
+        // A later batch starts counting afresh; a cancelled item drops out of it.
+        let d = try upload("d"), e = try upload("e")
+        q.add([d, e])
+        q.cancel(e)
+        await waitIdle(q)
+        #expect(q.batchProgress.count == 1 && q.batchProgress.finished == 1)
+    }
+}
