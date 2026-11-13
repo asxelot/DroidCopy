@@ -5,9 +5,29 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var model: AppModel?
     private var dock: DockProgress?
+    /// Opens the main window again; set by the window itself.
+    var reopenWindow: (() -> Void)?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Notifier.prepare()
+        // Closing the window quits the app, like a single-window utility should. Sheets and
+        // the Quick Look panel are windows too, so only the main window counts.
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { note in
+            guard let window = note.object as? NSWindow, Self.isMainWindow(window) else { return }
+            // From the run loop, not a main-queue block: while copies are cancelled, quitting
+            // waits on tasks that need the main queue, and a block would be holding it.
+            NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
+        }
+    }
+
+    static func isMainWindow(_ window: NSWindow) -> Bool {
+        window.identifier?.rawValue.hasPrefix("main") == true && window.sheetParent == nil
+    }
+
+    /// Clicking the Dock icon with no window open brings the window back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { reopenWindow?() }
+        return true
     }
 
     func attach(_ model: AppModel) {
@@ -16,7 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dock = DockProgress(queue: model.queue)
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    // Quitting on close is done above, once; letting AppKit do it too would ask twice while copying.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model, model.queue.hasActive else { return .terminateNow }
@@ -25,12 +46,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = "Quitting cancels them and deletes the unfinished copies."
         alert.addButton(withTitle: "Keep Copying")
         alert.addButton(withTitle: "Quit Anyway")
-        guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
+        guard alert.runModal() == .alertSecondButtonReturn else {
+            // The window may already be closed (closing it is what asked to quit): bring it back
+            // rather than leave DroidCopy running with no window.
+            if !NSApp.windows.contains(where: { Self.isMainWindow($0) && $0.isVisible }) { reopenWindow?() }
+            return .terminateCancel
+        }
         Task {
             await model.queue.cancelAllAndWait()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+    }
+}
+
+/// Hands the app delegate a way to reopen the main window.
+private struct ReopenHook: View {
+    let delegate: AppDelegate
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Color.clear.frame(width: 0, height: 0)
+            .onAppear { delegate.reopenWindow = { openWindow(id: "main") } }
     }
 }
 
@@ -45,6 +82,7 @@ struct DroidCopyApp: App {
             ContentView()
                 .environmentObject(model)
                 .environmentObject(ui)
+                .background(ReopenHook(delegate: delegate))
                 .onAppear {
                     delegate.attach(model)
                     model.start()

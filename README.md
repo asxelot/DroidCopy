@@ -94,6 +94,10 @@ device off or take the card out right after, then stops using the device. The de
 ejected until you unplug it or click **Reconnect**. adb itself keeps running, because other apps
 may be using it.
 
+**Closing the window quits DroidCopy.** If copies are still running, it asks first: **Keep
+Copying** brings the window back, and **Quit Anyway** cancels them and removes the unfinished
+copies.
+
 ## How copying stays safe
 
 - **Existing items:** if something with the same name already exists, you're asked whether to
