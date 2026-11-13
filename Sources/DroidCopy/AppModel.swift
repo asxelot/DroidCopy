@@ -810,6 +810,7 @@ final class AppModel: ObservableObject {
         let t = Transfer(direction: .toMac, serial: d.serial, source: item.path,
                          destDir: url.deletingLastPathComponent().path, name: url.lastPathComponent,
                          isDirectory: item.isDirectory, replace: false)
+        t.expectedBytes = item.isDirectory ? nil : item.size
         t.onComplete = { t in
             switch t.state {
             case .done: done(nil)
@@ -835,6 +836,7 @@ final class AppModel: ObservableObject {
             let t = Transfer(direction: .toMac, serial: d.serial, source: item.path, destDir: dir.path,
                              name: item.name, isDirectory: item.isDirectory, replace: false)
             t.destLabel = label
+            t.expectedBytes = item.isDirectory ? nil : item.size
             return t
         }
         for t in transfers {
@@ -893,6 +895,7 @@ final class AppModel: ObservableObject {
             let t = Transfer(direction: .toMac, serial: d.serial, source: item.path, destDir: dir.path,
                              name: item.name, isDirectory: item.isDirectory, replace: false)
             t.destLabel = "Clipboard"
+            t.expectedBytes = item.isDirectory ? nil : item.size
             t.onComplete = { [weak self] _ in self?.clipboardTransferFinished(token) }
             return t
         }

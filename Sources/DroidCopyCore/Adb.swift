@@ -33,7 +33,13 @@ public struct RunResult: Sendable {
     }
 }
 
-private final class DataBox: @unchecked Sendable { var data = Data() }
+/// Output collected from a pipe as it arrives.
+private final class DataBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var collected = Data()
+    func append(_ d: Data) { lock.lock(); collected.append(d); lock.unlock() }
+    var data: Data { lock.lock(); defer { lock.unlock() }; return collected }
+}
 
 /// Resumes a continuation once, whichever of "finished" and "timed out" comes first.
 private final class ResumeOnce: @unchecked Sendable {
@@ -72,44 +78,58 @@ public final class Adb: @unchecked Sendable {
     /// With a `timeout`, a command still running after that many seconds is stopped and reported
     /// as `timedOut`, so a device that stops answering can't leave the app waiting forever. Only
     /// this adb client process is stopped; the adb server and the device are left alone.
+    ///
+    /// Nothing here blocks a thread while adb runs: output arrives through readability handlers
+    /// and the end through the termination handler. (Blocking worker threads while waiting on
+    /// other worker threads deadlocks once many commands run at once and the pool is used up.)
     public func run(_ args: [String], timeout: TimeInterval? = nil,
                     onStart: (@Sendable (Process) -> Void)? = nil) async -> RunResult {
         await withCheckedContinuation { cont in
             let once = ResumeOnce(cont)
-            DispatchQueue.global(qos: .userInitiated).async {
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: self.path)
-                p.arguments = args
-                let out = Pipe(), err = Pipe()
-                p.standardOutput = out
-                p.standardError = err
-                p.standardInput = FileHandle.nullDevice
-                do { try p.run() } catch {
-                    once.resume(RunResult(output: "", error: error.localizedDescription, status: -1))
-                    return
-                }
-                onStart?(p)
-                if let timeout {
-                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                        guard p.isRunning else { return }
-                        p.terminate()
-                        // Don't wait for its output to close: something it started may hold it open.
-                        once.resume(RunResult(output: "", error: AdbError.notRespondingMessage,
-                                              status: RunResult.timedOutStatus))
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: self.path)
+            p.arguments = args
+            let out = Pipe(), err = Pipe()
+            p.standardOutput = out
+            p.standardError = err
+            p.standardInput = FileHandle.nullDevice
+
+            let outBox = DataBox(), errBox = DataBox()
+            let group = DispatchGroup()
+            for (pipe, box) in [(out, outBox), (err, errBox)] {
+                group.enter()
+                pipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if data.isEmpty {
+                        handle.readabilityHandler = nil
+                        group.leave()
+                    } else {
+                        box.append(data)
                     }
                 }
-                let errBox = DataBox()
-                let group = DispatchGroup()
-                group.enter()
-                DispatchQueue.global().async {
-                    errBox.data = err.fileHandleForReading.readDataToEndOfFile()
-                    group.leave()
+            }
+            group.enter()
+            p.terminationHandler = { _ in group.leave() }
+
+            do { try p.run() } catch {
+                out.fileHandleForReading.readabilityHandler = nil
+                err.fileHandleForReading.readabilityHandler = nil
+                once.resume(RunResult(output: "", error: error.localizedDescription, status: -1))
+                return
+            }
+            onStart?(p)
+            if let timeout {
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                    guard p.isRunning else { return }
+                    p.terminate()
+                    // Don't wait for its output to close: something it started may hold it open.
+                    once.resume(RunResult(output: "", error: AdbError.notRespondingMessage,
+                                          status: RunResult.timedOutStatus))
                 }
-                let outData = out.fileHandleForReading.readDataToEndOfFile()
-                group.wait()
-                p.waitUntilExit()
+            }
+            group.notify(queue: .global(qos: .userInitiated)) {
                 once.resume(RunResult(
-                    output: String(decoding: outData, as: UTF8.self),
+                    output: String(decoding: outBox.data, as: UTF8.self),
                     error: String(decoding: errBox.data, as: UTF8.self),
                     status: p.terminationStatus))
             }

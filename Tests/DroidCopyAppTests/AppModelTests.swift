@@ -611,11 +611,21 @@ final class Harness {
         return height
     }
 
+    @Test func barsAreThinLikeFinders() {
+        let bar = NSHostingController(rootView: ThinBar(fraction: 0.5).frame(width: 200))
+        #expect(bar.sizeThatFits(in: CGSize(width: 200, height: 100)).height == ThinBar.height)
+    }
+
+    @Test func aCopyingRowIsCompact() async throws {
+        let one = try await panelHeight(1)
+        #expect(one < 90, "header plus one copying row: \(one)")
+    }
+
     @Test func growsWithItsRowsUpToTheRoomGiven() async throws {
         let one = try await panelHeight(1)
         let two = try await panelHeight(2)
         let many = try await panelHeight(12)
-        #expect(one > 60 && one < 140, "one row plus the header, not a fixed block: \(one)")
+        #expect(one > 40 && one < 140, "one row plus the header, not a fixed block: \(one)")
         #expect(two > one + 20, "a second row makes it taller: \(one) → \(two)")
         #expect(abs(many - 400) < 1, "twelve rows fill the room and scroll: \(many)")
         #expect(abs(try await panelHeight(12, room: 250) - 250) < 1, "a smaller window gives a smaller panel")

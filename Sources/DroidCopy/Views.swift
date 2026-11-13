@@ -493,7 +493,7 @@ struct ActivityStatus: View {
                 }
             }
             if activity.count > 1 {
-                ProgressView(value: Double(activity.index - 1), total: Double(activity.count)).progressViewStyle(.linear)
+                ThinBar(fraction: Double(activity.index - 1) / Double(activity.count))
             }
         }
         .font(.callout)
@@ -652,16 +652,17 @@ struct TransferList: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Text("Transfers").font(.headline)
+                Text("Transfers").font(.subheadline.weight(.semibold))
                 if queue.hasActive {
                     BatchProgress(queue: queue)
                 }
                 Spacer()
                 Button("Clear Finished") { queue.clearFinished() }
+                    .controlSize(.small)
                     .disabled(queue.items.isEmpty)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.vertical, 4)
             Divider()
             // As tall as its rows when they fit in the space offered; otherwise the rows scroll.
             ViewThatFits(in: .vertical) {
@@ -674,12 +675,32 @@ struct TransferList: View {
     private var rows: some View {
         VStack(spacing: 0) {
             ForEach(Array(queue.items.enumerated()), id: \.element.id) { i, t in
-                if i > 0 { Divider().padding(.leading, 44) }
+                if i > 0 { Divider().padding(.leading, 36) }
                 TransferRow(transfer: t, queue: queue)
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 5)
             }
         }
+    }
+}
+
+/// A slim progress bar like Finder's copy window, instead of the system's tall one.
+struct ThinBar: View {
+    let fraction: Double
+    static let height: CGFloat = 4
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.12))
+                Capsule().fill(Color.accentColor)
+                    .frame(width: max(Self.height, geo.size.width * min(max(fraction, 0), 1)))
+            }
+        }
+        .frame(height: Self.height)
+        .accessibilityElement()
+        .accessibilityLabel("Progress")
+        .accessibilityValue("\(Int((min(max(fraction, 0), 1) * 100).rounded())) percent")
     }
 }
 
@@ -693,10 +714,10 @@ struct BatchProgress: View {
             if p.count > 1 {
                 HStack(spacing: 8) {
                     Text("\(min(p.finished + 1, p.count)) of \(p.count)")
-                        .font(.callout)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
-                    ProgressView(value: p.fraction).progressViewStyle(.linear).frame(width: 140)
+                    ThinBar(fraction: p.fraction).frame(width: 120)
                 }
             }
         }
@@ -710,7 +731,7 @@ struct TransferRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: transfer.direction == .toDevice ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
-                .font(.title2)
+                .font(.system(size: 17))
                 .foregroundStyle(iconColor)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -721,7 +742,7 @@ struct TransferRow: View {
                         .truncationMode(.head)
                 }
                 if transfer.state == .running {
-                    ProgressView(value: transfer.fraction).progressViewStyle(.linear)
+                    ThinBar(fraction: transfer.fraction)
                 }
                 Text(detail)
                     .font(.caption)
@@ -729,6 +750,7 @@ struct TransferRow: View {
                     .lineLimit(2)
                     .textSelection(.enabled)
             }
+            .font(.callout)
             Spacer(minLength: 8)
             switch transfer.state {
             case .waiting, .running:
@@ -743,7 +765,6 @@ struct TransferRow: View {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
             }
         }
-        .padding(.vertical, 3)
     }
 
     private var isFailed: Bool {

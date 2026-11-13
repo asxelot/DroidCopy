@@ -40,6 +40,9 @@ public final class Transfer: ObservableObject, Identifiable {
     public var cancelRequested = false
     /// Shown instead of the destination folder, e.g. "Clipboard".
     public var destLabel: String?
+    /// The size, when the caller already knows it (a file from a device listing). Lets the
+    /// queue estimate how long a batch takes without asking the device.
+    public var expectedBytes: Int64?
     /// Called once when the transfer ends in any way (done, failed or cancelled).
     public var onComplete: ((Transfer) -> Void)?
 
@@ -90,10 +93,17 @@ public final class TransferQueue: ObservableObject {
     private let adb: Adb
     private var busy = false
 
-    /// True once copying has gone on for `progressDelay` without a break, so quick copies of small
-    /// files don't flash the progress list on screen. False again when nothing is left to copy.
+    /// True when copying will take, or has taken, more than `progressDelay`: right away if the
+    /// batch's size at the speed seen so far says so, otherwise once it has run that long. Quick
+    /// copies of small files don't flash the progress list on screen. False again when nothing is
+    /// left to copy.
     @Published public private(set) var showsProgress = false
     public var progressDelay: TimeInterval = 2
+    /// Bytes per second expected for the next copy: a USB guess at first, then what copies
+    /// actually managed.
+    public var estimatedSpeed: Double = 25_000_000
+    /// Copies smaller than this are mostly start-up time, so they don't teach the speed.
+    public var minimumSampleBytes: Int64 = 4 << 20
     /// Bumped whenever the queue goes busy or idle, so a stale delayed reveal does nothing.
     private var busyPeriod = 0
 
@@ -125,7 +135,42 @@ public final class TransferQueue: ObservableObject {
         batch.append(contentsOf: transfers)
         items.append(contentsOf: transfers)
         updateActive()
+        estimate(transfers)
         pump()
+    }
+
+    /// Shows progress at once if the new transfers will plainly take longer than `progressDelay`.
+    private func estimate(_ transfers: [Transfer]) {
+        guard !showsProgress else { return }
+        let period = busyPeriod
+        let budget = progressDelay * estimatedSpeed
+        Task { @MainActor [weak self] in
+            var bytes: Double = 0
+            for t in transfers {
+                guard let self, self.busyPeriod == period, !self.showsProgress else { return }
+                bytes += Double(await self.expectedSize(t))
+                if bytes > budget {
+                    if self.activeCount > 0 { self.showsProgress = true }
+                    return
+                }
+            }
+        }
+    }
+
+    private func expectedSize(_ t: Transfer) async -> Int64 {
+        if let known = t.expectedBytes { return known }
+        if t.direction == .toDevice {
+            let src = t.source
+            return await Task.detached { LocalFS.size(URL(fileURLWithPath: src)) }.value
+        }
+        return await adb.size(t.serial, t.source) ?? 0
+    }
+
+    /// Learns the speed from a finished copy, smoothing out one-off slow or fast copies.
+    private func learnSpeed(bytes: Int64, seconds: TimeInterval) {
+        guard bytes >= minimumSampleBytes, seconds > 0 else { return }
+        let measured = Double(bytes) / seconds
+        estimatedSpeed = estimatedSpeed * 0.5 + measured * 0.5
     }
 
     private func updateActive() {
@@ -269,6 +314,7 @@ public final class TransferQueue: ObservableObject {
 
         // Copy, polling the copy's size for progress.
         let poller = Task { await self.poll(t, staging) }
+        let copyStarted = Date()
         let args = t.direction == .toDevice
             ? ["-s", t.serial, "push", t.source, staging]
             : ["-s", t.serial, "pull", t.source, staging]
@@ -279,6 +325,7 @@ public final class TransferQueue: ObservableObject {
             }
         }
         poller.cancel()
+        if result.ok && !t.cancelRequested { learnSpeed(bytes: t.total, seconds: Date().timeIntervalSince(copyStarted)) }
 
         if t.cancelRequested {
             await remove(t, staging)

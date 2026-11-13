@@ -466,6 +466,61 @@ import DroidCopyTestSupport
     }
 }
 
+@Suite @MainActor struct ProgressEstimateTests {
+    @Test func aBatchThatWillTakeAWhileShowsProgressRightAway() async throws {
+        let fake = try FakeAdb(push: .hang)
+        defer { fake.cleanUp() }
+        let src = try fake.macDir().appendingPathComponent("big.bin")
+        try writeFile(src.path, String(repeating: "x", count: 1000))
+        let dev = try fake.deviceDir()
+
+        let q = TransferQueue(adb: fake.adb)
+        q.progressDelay = 2
+        q.estimatedSpeed = 100   // 1000 bytes at 100 B/s: about 10 s
+        let t = Transfer(direction: .toDevice, serial: "FAKE123", source: src.path, destDir: dev,
+                         name: "big.bin", isDirectory: false, replace: false)
+        let started = Date()
+        q.add([t])
+        await waitUntil(seconds: 1.5) { q.showsProgress }
+        #expect(q.showsProgress)
+        #expect(Date().timeIntervalSince(started) < 1, "without waiting out the 2 s delay")
+        q.cancel(t)
+        await waitIdle(q)
+        #expect(!q.showsProgress)
+    }
+
+    @Test func aKnownSizeIsUsedWithoutMeasuring() async throws {
+        let fake = try FakeAdb(pull: .hang)
+        defer { fake.cleanUp() }
+        let dev = try fake.deviceDir()
+        try writeFile(Parse.join(dev, "a.iso"), "tiny")
+        let q = TransferQueue(adb: fake.adb)
+        q.progressDelay = 2
+        let t = Transfer(direction: .toMac, serial: "FAKE123", source: Parse.join(dev, "a.iso"),
+                         destDir: try fake.macDir().path, name: "a.iso", isDirectory: false, replace: false)
+        t.expectedBytes = 7 << 30   // a 7 GB ISO, as the listing said
+        q.add([t])
+        await waitUntil(seconds: 1) { q.showsProgress }
+        #expect(q.showsProgress)
+        q.cancel(t)
+        await waitIdle(q)
+    }
+
+    @Test func finishedCopiesTeachTheSpeed() async throws {
+        let fake = try FakeAdb()
+        defer { fake.cleanUp() }
+        let src = try fake.macDir().appendingPathComponent("a.bin")
+        try writeFile(src.path, String(repeating: "x", count: 100_000))
+        let q = TransferQueue(adb: fake.adb)
+        q.minimumSampleBytes = 0
+        q.estimatedSpeed = 1
+        q.add([Transfer(direction: .toDevice, serial: "FAKE123", source: src.path, destDir: try fake.deviceDir(),
+                        name: "a.bin", isDirectory: false, replace: false)])
+        await waitIdle(q)
+        #expect(q.estimatedSpeed > 1000, "learned from a real copy: \(q.estimatedSpeed)")
+    }
+}
+
 @Suite @MainActor struct BatchProgressTests {
     @Test func countsTheBatchAddedSinceTheQueueWasIdle() async throws {
         let fake = try FakeAdb()
