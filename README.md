@@ -42,12 +42,12 @@ The window works like a Finder window in list view, for the connected device.
   (⌃⌘T, or right-click a folder), drag them into a different order, and right-click to remove
   one. They're kept per device.
 - **Getting around:** double-click a folder or press ⌘↓/⌘O. Back and Forward (⌘[ ⌘]), Enclosing
-  Folder (⌘↑), Go to Folder (⇧⌘G) and the path bar at the bottom work as in Finder. The first
+  Folder (⌘↑) and Go to Folder (⇧⌘G) work as in Finder. The first
   time, it opens the SD card, or internal storage if there's no card. After that, it opens the
   folder you were in last.
 - **Search** (⌘F) narrows the folder being shown. You can also type a name to jump to it.
-- **View menu:** show hidden files (⇧⌘.), the path bar (⌥⌘P) and the status bar (⌘/), which
-  shows the item count and free space.
+- **View menu:** show hidden files (⇧⌘.). The path bar (⌥⌘P) and the status bar (⌘/, item
+  count and free space) are hidden unless you turn them on, as in Finder.
 - **Opening files:** double-click a file to copy it to the Mac and open it there. Space shows it
   in Quick Look. Files over 1 GB aren't previewed.
 

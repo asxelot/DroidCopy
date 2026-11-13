@@ -16,8 +16,9 @@ final class WindowState: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        showPathBar = defaults.object(forKey: "showPathBar") as? Bool ?? true
-        showStatusBar = defaults.object(forKey: "showStatusBar") as? Bool ?? true
+        // Off unless turned on in the View menu, as in Finder.
+        showPathBar = defaults.object(forKey: "showPathBar") as? Bool ?? false
+        showStatusBar = defaults.object(forKey: "showStatusBar") as? Bool ?? false
     }
 }
 
