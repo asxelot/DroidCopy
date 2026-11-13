@@ -589,9 +589,12 @@ final class Harness {
 }
 
 @Suite @MainActor struct TransferPanelTests {
-    /// The height the panel takes for `count` transfers (one copying, held open; the rest waiting)
-    /// when offered `room` points, as MainLayout offers it half the window.
-    private func panelHeight(_ count: Int, room: CGFloat = 400) async throws -> CGFloat {
+    final class Measured { var height: CGFloat = 0 }
+
+    /// The height the panel gets for `count` transfers (one copying, held open; the rest waiting)
+    /// at the bottom of a window `window` points tall, laid out as BrowserView lays it out: under
+    /// a folder view that takes all the room it can.
+    private func panelHeight(_ count: Int, window: CGFloat = 700) async throws -> CGFloat {
         let fake = try FakeAdb(push: .hang)
         defer { fake.cleanUp() }
         let dev = try fake.deviceDir()
@@ -605,10 +608,20 @@ final class Harness {
         }
         queue.add(transfers)
         await waitUntil { transfers[0].state == .running }
-        let host = NSHostingController(rootView: TransferList(queue: queue))
-        let height = host.sizeThatFits(in: CGSize(width: 700, height: room)).height
+        let measured = Measured()
+        let host = NSHostingView(rootView: VStack(spacing: 0) {
+            Color.clear.frame(maxHeight: .infinity)
+            TransferList(queue: queue, maxRowsHeight: window * BrowserView.transferShare)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { measured.height = $0 }
+        })
+        host.frame = CGRect(x: 0, y: 0, width: 700, height: window)
+        // The rows are measured in one pass and the panel sized to them in the next.
+        for _ in 0..<10 {
+            host.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(30))
+        }
         await queue.cancelAllAndWait()
-        return height
+        return measured.height
     }
 
     @Test func barsAreThinLikeFinders() {
@@ -618,17 +631,20 @@ final class Harness {
 
     @Test func aCopyingRowIsCompact() async throws {
         let one = try await panelHeight(1)
-        #expect(one < 90, "header plus one copying row: \(one)")
+        #expect(one > 40 && one < 90, "header plus one copying row, not a share of the window: \(one)")
+        let tall = try await panelHeight(1, window: 1200)
+        #expect(abs(tall - one) < 1, "a taller window doesn't stretch it: \(one) vs \(tall)")
     }
 
-    @Test func growsWithItsRowsUpToTheRoomGiven() async throws {
+    @Test func growsWithItsRowsUpToACap() async throws {
         let one = try await panelHeight(1)
         let two = try await panelHeight(2)
         let many = try await panelHeight(12)
-        #expect(one > 40 && one < 140, "one row plus the header, not a fixed block: \(one)")
+        let cap = 700 * BrowserView.transferShare
         #expect(two > one + 20, "a second row makes it taller: \(one) → \(two)")
-        #expect(abs(many - 400) < 1, "twelve rows fill the room and scroll: \(many)")
-        #expect(abs(try await panelHeight(12, room: 250) - 250) < 1, "a smaller window gives a smaller panel")
+        #expect(many > cap && many < cap + 40, "twelve rows stop at the cap (plus the header) and scroll: \(many)")
+        let small = try await panelHeight(12, window: 450)
+        #expect(small < many - 50, "a smaller window gives a smaller panel: \(many) vs \(small)")
     }
 }
 

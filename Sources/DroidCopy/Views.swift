@@ -312,7 +312,8 @@ struct BrowserView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var ui: WindowState
     @ObservedObject var queue: TransferQueue
-    static let transferShare: CGFloat = 0.5
+    /// The transfer list is as tall as its rows, up to this share of the window (then it scrolls).
+    static let transferShare: CGFloat = 0.35
 
     var body: some View {
         GeometryReader { geo in
@@ -334,9 +335,7 @@ struct BrowserView: View {
                 }
                 if queue.showsProgress || queue.failedCount > 0 {
                     Divider()
-                    // As tall as its rows, but never more than half the window.
-                    TransferList(queue: queue)
-                        .frame(maxHeight: geo.size.height * Self.transferShare)
+                    TransferList(queue: queue, maxRowsHeight: geo.size.height * Self.transferShare)
                 }
             }
         }
@@ -647,8 +646,16 @@ struct GoToFolderSheet: View {
 
 // MARK: - Transfers
 
+/// The measured height of the transfer rows.
+/// (An ObservableObject because `@State` needs a macro plugin the Command Line Tools lack.)
+final class MeasuredHeight: ObservableObject {
+    @Published var value: CGFloat = 0
+}
+
 struct TransferList: View {
     @ObservedObject var queue: TransferQueue
+    let maxRowsHeight: CGFloat
+    @StateObject private var rowsHeight = MeasuredHeight()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -665,12 +672,15 @@ struct TransferList: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             Divider()
-            // As tall as its rows when they fit in the space offered; otherwise the rows scroll.
-            ViewThatFits(in: .vertical) {
-                rows
-                ScrollView { rows }
+            // Exactly as tall as its rows; past the cap they scroll. (A `maxHeight` frame would
+            // take all the space it's allowed and leave the rows floating in a tall empty panel.)
+            ScrollView {
+                rows.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { rowsHeight.value = $0 }
             }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(height: min(rowsHeight.value, max(maxRowsHeight, 44)))
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var rows: some View {
@@ -685,23 +695,61 @@ struct TransferList: View {
     }
 }
 
-/// A slim progress bar like Finder's copy window, instead of the system's tall one.
+/// A slim progress bar like Finder's copy window, instead of the system's tall one. A light
+/// sweeps along it so you can tell it's still working when the numbers barely move.
 struct ThinBar: View {
     let fraction: Double
+    var moving = true
     static let height: CGFloat = 4
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geo in
+            let f = min(max(fraction, 0), 1)
+            let fill = max(Self.height, geo.size.width * f)
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.primary.opacity(0.12))
+                // Before there's anything to show, a segment runs along the empty track instead.
+                if moving && !reduceMotion && fill < Sweep.width {
+                    Sweep(color: Color.accentColor.opacity(0.6)).clipShape(Capsule())
+                }
                 Capsule().fill(Color.accentColor)
-                    .frame(width: max(Self.height, geo.size.width * min(max(fraction, 0), 1)))
+                    .frame(width: fill)
+                    .overlay {
+                        if moving && !reduceMotion && fill >= Sweep.width {
+                            Sweep(color: .white.opacity(0.5))
+                        }
+                    }
+                    .clipShape(Capsule())
+                    .animation(.linear(duration: 0.4), value: f)
             }
         }
         .frame(height: Self.height)
         .accessibilityElement()
         .accessibilityLabel("Progress")
         .accessibilityValue("\(Int((min(max(fraction, 0), 1) * 100).rounded())) percent")
+    }
+}
+
+/// A soft highlight that travels left to right across whatever it's laid over, every 1.5 s.
+struct Sweep: View {
+    let color: Color
+    static let width: CGFloat = 40
+    static let period: TimeInterval = 1.5
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+            GeometryReader { geo in
+                let t = context.date.timeIntervalSinceReferenceDate
+                    .truncatingRemainder(dividingBy: Self.period) / Self.period
+                LinearGradient(colors: [color.opacity(0), color, color.opacity(0)],
+                               startPoint: .leading, endPoint: .trailing)
+                    .frame(width: Self.width)
+                    .offset(x: -Self.width + (geo.size.width + Self.width) * t)
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -718,7 +766,7 @@ struct BatchProgress: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
-                    ThinBar(fraction: p.fraction).frame(width: 120)
+                    ThinBar(fraction: p.fraction, moving: false).frame(width: 120)
                 }
             }
         }
