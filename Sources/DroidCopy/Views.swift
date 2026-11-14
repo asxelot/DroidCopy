@@ -721,7 +721,7 @@ struct ThinBar: View {
                         }
                     }
                     .clipShape(Capsule())
-                    .animation(.linear(duration: 0.4), value: f)
+                    .animation(.linear(duration: 1), value: f)  // progress is checked once a second
             }
         }
         .frame(height: Self.height)

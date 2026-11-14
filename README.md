@@ -140,6 +140,13 @@ them afterwards. They run only when you name a device:
 DROIDCOPY_DEVICE=<serial from `adb devices`> swift test --filter DeviceIntegrationTests
 ```
 
+`SnapshotTests` renders the transfer panel to images (and a GIF of its progress bar) for showing a
+change. It runs only when you give it a folder:
+
+```sh
+DROIDCOPY_SNAPSHOT_DIR=/tmp/snap swift test --filter SnapshotTests
+```
+
 **Layout**
 - `Sources/DroidCopyCore`: adb commands, output parsing and the transfer queue. No UI; everything
   here is tested.
