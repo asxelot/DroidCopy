@@ -274,6 +274,8 @@ final class AppModel: ObservableObject {
         searchText = ""
         cutPaths = []
         cut = nil
+        undoManager?.removeAllActions(withTarget: self)
+        refreshUndoMenu()
     }
 
     func selectStorage(_ s: StorageRoot) {
@@ -456,6 +458,7 @@ final class AppModel: ObservableObject {
             alertMessage = "Couldn’t create the folder: \(r.message)"
             return
         }
+        record(DeviceChange(name: "New Folder", serial: d.serial, op: .makeFolder(path)))
         await loadDevice()
         guard dir == deviceDir else { return }
         searchText = ""
@@ -470,6 +473,7 @@ final class AppModel: ObservableObject {
         if r.ok {
             pathMoved(from: item.path, to: newPath)
             if deviceSelection.contains(item.path) { selectAfterLoad.insert(newPath) }
+            record(DeviceChange(name: "Rename", serial: d.serial, op: .move([(item.path, newPath)])))
         } else {
             alertMessage = "Couldn’t rename: \(r.message)"
         }
@@ -534,6 +538,7 @@ final class AppModel: ObservableObject {
     private func performMove(_ items: [FileItem], to dir: String, copy: Bool, replacing: Set<String>) async {
         guard let adb, let d = device, !items.isEmpty, deviceIsFree() else { return }
         var landed: Set<String> = []
+        var undoable: [(String, String)] = []
         for (i, item) in items.enumerated() {
             activity = DeviceActivity(verb: copy ? "Copying" : "Moving", noun: copy ? "copy" : "move",
                                       name: item.name, index: i + 1, count: items.count, started: Date())
@@ -547,8 +552,13 @@ final class AppModel: ObservableObject {
             }
             if !copy { pathMoved(from: item.path, to: dest) }
             landed.insert(dest)
+            // A replaced item is gone for good, so that one can't be put back.
+            if !replace { undoable.append((item.path, dest)) }
         }
         activity = nil
+        if !undoable.isEmpty {
+            record(DeviceChange(name: copy ? "Copy" : "Move", serial: d.serial, op: copy ? .copy(undoable) : .move(undoable)))
+        }
         cutPaths.subtract(items.map(\.path))
         if dir == deviceDir { selectAfterLoad = landed; deviceSelection = [] }
         await loadDevice()
@@ -558,6 +568,7 @@ final class AppModel: ObservableObject {
     func duplicate(_ items: [FileItem]) async {
         guard let adb, let d = device, !items.isEmpty, deviceIsFree() else { return }
         var made: Set<String> = []
+        var copies: [(String, String)] = []
         var takenByDir: [String: Set<String>] = [:]
         for (i, item) in items.enumerated() {
             let dir = Parse.parent(item.path)
@@ -574,9 +585,157 @@ final class AppModel: ObservableObject {
                 break
             }
             made.insert(dest)
+            copies.append((item.path, dest))
         }
         activity = nil
+        if !copies.isEmpty { record(DeviceChange(name: "Duplicate", serial: d.serial, op: .copy(copies))) }
         selectAfterLoad = made
+        deviceSelection = []
+        await loadDevice()
+    }
+
+    // MARK: Undo
+
+    /// A change on the device that ⌘Z can reverse. Deletes aren't undoable (Android has no Trash),
+    /// and neither are copies from the Mac.
+    struct DeviceChange {
+        enum Op {
+            case move([(from: String, to: String)])
+            case copy([(source: String, copy: String)])
+            case removeCopies([(source: String, copy: String)])
+            case makeFolder(String)
+            case removeFolder(String)
+        }
+        /// For the Edit menu: "Undo Rename".
+        let name: String
+        let serial: String
+        let op: Op
+
+        var inverse: DeviceChange {
+            let back: Op
+            switch op {
+            case .move(let pairs): back = .move(pairs.reversed().map { ($0.to, $0.from) })
+            case .copy(let pairs): back = .removeCopies(pairs)
+            case .removeCopies(let pairs): back = .copy(pairs)
+            case .makeFolder(let path): back = .removeFolder(path)
+            case .removeFolder(let path): back = .makeFolder(path)
+            }
+            return DeviceChange(name: name, serial: serial, op: back)
+        }
+    }
+
+    /// The window's undo manager, which the Edit menu's Undo and Redo use. Set by the window.
+    weak var undoManager: UndoManager? { didSet { observeUndo() } }
+    /// The Edit menu's titles, "Undo Rename" and so on, like Finder. Text fields' typing shows too,
+    /// since they share the window's undo manager.
+    @Published private(set) var undoTitle = "Undo"
+    @Published private(set) var redoTitle = "Redo"
+    @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
+    private var undoObservers: [NSObjectProtocol] = []
+
+    private func observeUndo() {
+        undoObservers.forEach(NotificationCenter.default.removeObserver)
+        let names: [Notification.Name] = [.NSUndoManagerCheckpoint, .NSUndoManagerDidCloseUndoGroup,
+                                          .NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange]
+        // Posted on the main thread, so handled right there (queue nil), before the menu is next drawn.
+        undoObservers = names.map {
+            NotificationCenter.default.addObserver(forName: $0, object: undoManager, queue: nil) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshUndoMenu() }
+            }
+        }
+        refreshUndoMenu()
+    }
+
+    private func refreshUndoMenu() {
+        let um = undoManager
+        if canUndo != (um?.canUndo ?? false) { canUndo = um?.canUndo ?? false }
+        if canRedo != (um?.canRedo ?? false) { canRedo = um?.canRedo ?? false }
+        let u = um?.undoMenuItemTitle ?? "Undo", r = um?.redoMenuItemTitle ?? "Redo"
+        if undoTitle != u { undoTitle = u }
+        if redoTitle != r { redoTitle = r }
+    }
+    /// The undo or redo running on the device. Tests wait for it.
+    private(set) var undoTask: Task<Void, Never>?
+
+    /// Makes `done` the next thing ⌘Z reverses.
+    private func record(_ done: DeviceChange) {
+        guard let um = undoManager else { return }
+        // Device changes finish outside any event, where the undo manager's automatic group
+        // would stay open (and the Edit menu unaware) until something else closes it.
+        let opened = um.groupingLevel == 0
+        if opened { um.beginUndoGrouping() }
+        registerReversal(of: done)
+        if opened { um.endUndoGrouping() }
+    }
+
+    private func registerReversal(of done: DeviceChange) {
+        undoManager?.registerUndo(withTarget: self) { $0.run(done.inverse) }
+        undoManager?.setActionName(done.name)
+    }
+
+    /// Runs an undo or redo. Its own reversal is registered right away, while the undo manager
+    /// is undoing (or redoing), so it lands on the other stack; the device work follows.
+    private func run(_ change: DeviceChange) {
+        let verb = undoManager?.isRedoing == true ? "redo" : "undo"
+        registerReversal(of: change)
+        undoTask = Task { await perform(change, verb: verb) }
+    }
+
+    private func perform(_ change: DeviceChange, verb: String) async {
+        func fail(_ why: String) {
+            alertMessage = "Couldn’t \(verb) \(change.name.lowercased()): \(why)"
+            // What's on the device no longer matches the history.
+            undoManager?.removeAllActions(withTarget: self)
+            refreshUndoMenu()
+        }
+        guard let adb, let d = device, d.serial == change.serial else { return fail("the device isn’t connected.") }
+        guard activity == nil else { return fail("wait for the \(activity!.noun) to finish.") }
+        var touched: [String] = []
+        var failure: String?
+        let label = verb == "undo" ? "Undoing" : "Redoing"
+        func step(_ path: String, _ i: Int, _ n: Int) {
+            activity = DeviceActivity(verb: label, noun: verb, name: (path as NSString).lastPathComponent,
+                                      index: i + 1, count: n, started: Date())
+        }
+        switch change.op {
+        case .move(let pairs):
+            for (i, p) in pairs.enumerated() {
+                step(p.from, i, pairs.count)
+                let r = await adb.move(d.serial, from: p.from, to: p.to)
+                if !r.ok { failure = r.message; break }
+                pathMoved(from: p.from, to: p.to)
+                touched.append(p.to)
+            }
+        case .copy(let pairs):
+            for (i, p) in pairs.enumerated() {
+                step(p.source, i, pairs.count)
+                let r = await adb.copy(d.serial, from: p.source, to: p.copy)
+                if !r.ok { failure = r.message; break }
+                touched.append(p.copy)
+            }
+        case .removeCopies(let pairs):
+            for (i, p) in pairs.enumerated() {
+                step(p.copy, i, pairs.count)
+                // Without the original, the copy is the only one left; keep it.
+                guard await adb.exists(d.serial, p.source) else {
+                    failure = "“\((p.source as NSString).lastPathComponent)” is gone, so its copy is kept."
+                    break
+                }
+                let r = await adb.delete(d.serial, p.copy)
+                if !r.ok { failure = r.message; break }
+                pathDeleted(p.copy)
+            }
+        case .makeFolder(let path):
+            let r = await adb.makeDirectory(d.serial, path)
+            if r.ok { touched.append(path) } else { failure = r.message }
+        case .removeFolder(let path):
+            let r = await adb.removeEmptyDirectory(d.serial, path)
+            if !r.ok { failure = "“\((path as NSString).lastPathComponent)” isn’t empty any more." }
+        }
+        activity = nil
+        if let failure { fail(failure) }
+        selectAfterLoad = Set(touched.filter { Parse.parent($0) == deviceDir })
         deviceSelection = []
         await loadDevice()
     }

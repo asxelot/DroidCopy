@@ -72,6 +72,12 @@ progress meanwhile.
 Name clashes are asked about first. Copies on the device use the same hidden-name-until-done
 rule as copies from the Mac.
 
+**Undo** (⌘Z) and **Redo** (⇧⌘Z) work for renames, moves, copies on the device, Duplicate and New
+Folder. The Edit menu says what will be undone ("Undo Rename"). Undoing a copy removes it, but only
+while the original is still there. Undoing New Folder removes the folder only if it's still empty. A
+move or copy that replaced an existing item can't be undone, because the old item is gone. Deletes
+can't be undone either, and copies from the Mac aren't on the list.
+
 **Copying to the Mac**
 - Drag items from the list into any Finder window or onto the Desktop. Finder asks DroidCopy for
   each item, and it is pulled straight to where you dropped it.

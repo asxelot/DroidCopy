@@ -25,6 +25,7 @@ final class WindowState: ObservableObject {
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var ui: WindowState
+    @Environment(\.undoManager) private var undoManager
 
     var body: some View {
         NavigationSplitView {
@@ -38,6 +39,8 @@ struct ContentView: View {
         .toolbar { BrowserToolbar() }
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search")
         .frame(minWidth: 680, minHeight: 440)
+        // Edit ▸ Undo (⌘Z) reverses renames, moves, copies and new folders on the device.
+        .onAppear { model.undoManager = undoManager }
         .confirmationDialog(
             conflictTitle,
             isPresented: Binding(get: { model.pending != nil }, set: { if !$0 { model.pending = nil } }),

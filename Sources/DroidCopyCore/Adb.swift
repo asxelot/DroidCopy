@@ -296,6 +296,11 @@ public final class Adb: @unchecked Sendable {
         Parse.join(Parse.parent(path), ".dc-old~" + (path as NSString).lastPathComponent)
     }
 
+    /// Removes a folder only if it's empty (`rmdir`), so nothing inside can be lost.
+    public func removeEmptyDirectory(_ serial: String, _ path: String) async -> RunResult {
+        await shell(serial, "rmdir \(Parse.shellQuote(path))")
+    }
+
     public func delete(_ serial: String, _ path: String) async -> RunResult {
         await shell(serial, "rm -rf \(Parse.shellQuote(path))")
     }
