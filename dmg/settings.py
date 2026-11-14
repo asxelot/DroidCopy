@@ -6,6 +6,9 @@ app = defines["app"]
 files = [app]
 symlinks = {"Applications": "/Applications"}
 
+# The disk's own icon on the desktop and in Finder's sidebar: the app's icon.
+icon = os.path.join(app, "Contents", "Resources", "AppIcon.icns")
+
 format = "UDZO"
 filesystem = "HFS+"
 background = defines["background"]
