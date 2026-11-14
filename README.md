@@ -88,7 +88,11 @@ The window works like a Finder window in list view, for the connected device.
   time, it opens the SD card, or internal storage if there's no card. After that, it opens the
   folder you were in last.
 - **Search** (⌘F, or the magnifier in the toolbar) narrows the folder being shown. As in Finder, the
-  field opens when you use it and closes again when it's empty. You can also type a name to jump to it.
+  field opens when you use it and closes again when it's empty. While you search, a bar under the
+  toolbar switches between this folder only (instant) and **this folder and its subfolders**, which
+  searches everything inside it on the device. Subfolder results show a **Where** column, and
+  right-click ▸ **Show in Enclosing Folder** opens the folder an item is in. You can also type a
+  name to jump to it.
 - **Free space** on the storage you're in is shown under the window title.
 - **View menu:** show hidden files (⇧⌘.). The path bar (⌥⌘P) and the status bar (⌘/, item
   count and free space) are hidden unless you turn them on, as in Finder.
@@ -133,6 +137,25 @@ copies from the Mac have finished.
   files, dragging or **Copy to Mac…** is better because they don't make that extra copy.
 - **Copy to Mac…** on the right-click menu asks for a folder and copies there.
 
+**Installing apps:** **File ▸ Install App…**, or drop `.apk` files on the window and choose
+**Install** (or **Copy to Folder** to keep the file). It runs `adb install -r`, so an app that's
+already installed is updated and keeps its data. Installs show in the transfer list like copies.
+
+**Over Wi-Fi:** **File ▸ Connect over Wi-Fi…** (also on the "No Device" screen). The device and the
+Mac need to be on the same network, and copying is slower than over a cable.
+- With the cable plugged in, **Switch to Wi-Fi** turns on adb over Wi-Fi (`adb tcpip 5555`) and
+  connects; then you can unplug. Restarting the device turns it off again.
+- Or connect to an address. On Android 11 or later, **Developer options ▸ Wireless debugging**
+  shows one; the first time, pair with the code from **Pair device with pairing code**.
+- **Eject** on a Wi-Fi device ends that connection.
+
+**Settings** (⌘,):
+- **Check copies by content**: after each copy, compare checksums (MD5) of the copy and the
+  original, not just their sizes. Catches copies damaged by a failing card or cable, but reads
+  everything a second time. Off by default.
+- **Check for updates automatically**: once a day, ask GitHub whether there's a newer release, and
+  say so once per version. **DroidCopy ▸ Check for Updates…** checks right away. On by default.
+
 **Paths in Terminal:** drag items into a Terminal window to type their device paths, escaped for
 the shell the way Terminal does for files from Finder (`/storage/7EF7-7423/ROMs/Fire\ Emblem.nsp`).
 They're ready to use in `adb shell` commands. Nothing is copied. Other apps that take dropped text
@@ -166,7 +189,8 @@ copies.
 - **Existing items:** if something with the same name already exists, you're asked whether to
   replace it or skip it. Nothing is overwritten without asking.
 - **Hidden name until verified:** each copy is written under a hidden name (`.dc~<name>`), its
-  size is checked against the source, and only then is it renamed into place. A cancelled or
+  size is checked against the source (and its checksum, with **Check copies by content** on), and
+  only then is it renamed into place. A cancelled or
   failed copy never leaves a half-written file under the real name.
 - **Replacing:** the old item is kept until the new copy has been verified. The one exception is
   when the new copy only fits because the old one is deleted; then the old one is deleted first.
