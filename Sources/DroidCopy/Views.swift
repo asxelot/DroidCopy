@@ -57,6 +57,20 @@ struct ContentView: View {
             Text(Self.nameList(batch.conflicts.map(\.name)))
         }
         .confirmationDialog(
+            installTitle,
+            isPresented: Binding(get: { model.pendingAPKs != nil }, set: { if !$0 { model.pendingAPKs = nil } }),
+            titleVisibility: .visible,
+            presenting: model.pendingAPKs
+        ) { p in
+            Button(p.apks.count == 1 ? "Install" : "Install \(p.apks.count) Apps") { model.installPending() }
+            Button("Copy to Folder") { model.copyPending() }
+            Button("Cancel", role: .cancel) {}
+        } message: { p in
+            Text(p.urls.count > p.apks.count
+                 ? "Or copy the files into “\((p.folder as NSString).lastPathComponent)”. The other dropped items are copied either way."
+                 : "Or copy \(p.apks.count == 1 ? "the file" : "the files") into “\((p.folder as NSString).lastPathComponent)”.")
+        }
+        .confirmationDialog(
             moveTitle,
             isPresented: Binding(get: { model.pendingMove != nil }, set: { if !$0 { model.pendingMove = nil } }),
             titleVisibility: .visible,
@@ -93,6 +107,12 @@ struct ContentView: View {
         .sheet(isPresented: $ui.goingToFolder) {
             GoToFolderSheet()
         }
+    }
+
+    private var installTitle: String {
+        guard let p = model.pendingAPKs else { return "" }
+        let device = model.device?.displayName ?? "the device"
+        return p.apks.count == 1 ? "Install “\(p.apks[0].lastPathComponent)” on “\(device)”?" : "Install \(p.apks.count) apps on “\(device)”?"
     }
 
     private var conflictTitle: String {
@@ -783,18 +803,18 @@ struct TransferRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: transfer.direction == .toDevice ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
+            Image(systemName: symbol)
                 .font(.system(size: 17))
                 .foregroundStyle(iconColor)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(transfer.name).lineLimit(1).truncationMode(.middle)
-                    Text(transfer.destLabel.map { "→ \($0)" } ?? "→ \(transfer.direction == .toDevice ? "device" : "Mac"): \(transfer.destDir)")
+                    Text(destination)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.head)
                 }
-                if transfer.state == .running {
+                if transfer.state == .running && transfer.direction != .install {
                     ThinBar(fraction: transfer.fraction)
                 }
                 Text(detail)
@@ -825,6 +845,23 @@ struct TransferRow: View {
         return false
     }
 
+    private var symbol: String {
+        switch transfer.direction {
+        case .toDevice: return "arrow.up.circle.fill"
+        case .toMac: return "arrow.down.circle.fill"
+        case .install: return "app.badge.checkmark.fill"
+        }
+    }
+
+    private var destination: String {
+        if let label = transfer.destLabel { return "→ \(label)" }
+        switch transfer.direction {
+        case .toDevice: return "→ device: \(transfer.destDir)"
+        case .toMac: return "→ Mac: \(transfer.destDir)"
+        case .install: return "→ install on the device"
+        }
+    }
+
     private var iconColor: Color {
         switch transfer.state {
         case .done: return .green
@@ -839,6 +876,7 @@ struct TransferRow: View {
         case .waiting:
             return "Waiting"
         case .running:
+            if transfer.direction == .install { return "Installing \(Fmt.bytes(transfer.total))…" }
             if transfer.checking { return "Checking the copy against the original…" }
             guard transfer.total > 0 else { return "Preparing…" }
             var parts = ["\(Fmt.bytes(transfer.transferred)) of \(Fmt.bytes(transfer.total))"]
@@ -850,12 +888,13 @@ struct TransferRow: View {
             return parts.joined(separator: " · ")
         case .done:
             let elapsed = (transfer.finishedAt ?? Date()).timeIntervalSince(transfer.startedAt ?? Date())
+            if transfer.direction == .install { return "Installed in \(Fmt.duration(elapsed))" }
             let avg = elapsed > 0 ? " · avg \(Fmt.speed(Double(transfer.total) / elapsed))" : ""
             return "\(Fmt.bytes(transfer.total)) · done in \(Fmt.duration(elapsed))\(avg)"
         case .failed(let message):
             return "Failed: \(message)"
         case .cancelled:
-            return "Cancelled. The unfinished copy was deleted."
+            return transfer.direction == .install ? "Cancelled." : "Cancelled. The unfinished copy was deleted."
         }
     }
 }

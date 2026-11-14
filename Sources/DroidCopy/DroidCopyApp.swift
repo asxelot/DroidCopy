@@ -151,6 +151,8 @@ struct FinderCommands: Commands {
                 .disabled(model.selectedItems.isEmpty)
             Button("Copy to Mac…") { model.copyToMac(model.selectedItems) }
                 .disabled(model.selectedItems.isEmpty)
+            Button("Install App…") { model.chooseAppsToInstall() }
+                .disabled(model.device == nil)
             Divider()
             Button("Add to Sidebar") { model.addToSidebar(model.selectedItems) }
                 .keyboardShortcut("t", modifiers: [.command, .control])

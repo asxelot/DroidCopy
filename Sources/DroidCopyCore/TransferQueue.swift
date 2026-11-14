@@ -11,7 +11,11 @@ public final class StopFlag: @unchecked Sendable {
 
 @MainActor
 public final class Transfer: ObservableObject, Identifiable {
-    public enum Direction { case toDevice, toMac }
+    public enum Direction {
+        case toDevice, toMac
+        /// `adb install` of an .apk from the Mac: the app is installed, no file is copied.
+        case install
+    }
 
     public enum State: Equatable {
         case waiting, running, done, failed(String), cancelled
@@ -31,7 +35,7 @@ public final class Transfer: ObservableObject, Identifiable {
     public let id = UUID()
     public let direction: Direction
     public let serial: String
-    /// Mac path for uploads, device path for downloads.
+    /// Mac path for uploads and installs, device path for downloads.
     public let source: String
     public let destDir: String
     public let name: String
@@ -78,7 +82,7 @@ public final class Transfer: ObservableObject, Identifiable {
     public var asidePath: String { inDestDir(".dc-old~" + name) }
 
     private func inDestDir(_ file: String) -> String {
-        direction == .toDevice
+        direction != .toMac
             ? Parse.join(destDir, file)
             : URL(fileURLWithPath: destDir).appendingPathComponent(file).path
     }
@@ -175,7 +179,7 @@ public final class TransferQueue: ObservableObject {
 
     private func expectedSize(_ t: Transfer) async -> Int64 {
         if let known = t.expectedBytes { return known }
-        if t.direction == .toDevice {
+        if t.direction != .toMac {
             let src = t.source
             return await Task.detached { LocalFS.size(URL(fileURLWithPath: src)) }.value
         }
@@ -210,12 +214,15 @@ public final class TransferQueue: ObservableObject {
 
     /// One alert's worth of text about failed transfers, or nil if none failed.
     public static func failureSummary(_ transfers: [Transfer]) -> String? {
-        let failed = transfers.compactMap { t in t.state.failure.map { (name: t.name, message: $0) } }
+        let failedTransfers = transfers.filter(\.state.isFailed)
+        let failed = failedTransfers.compactMap { t in t.state.failure.map { (name: t.name, message: $0) } }
         guard let first = failed.first else { return nil }
-        if failed.count == 1 { return "Couldn’t copy “\(first.name)”.\n\n\(first.message)" }
+        let installs = failedTransfers.allSatisfy { $0.direction == .install }
+        if failed.count == 1 { return "Couldn’t \(installs ? "install" : "copy") “\(first.name)”.\n\n\(first.message)" }
         let shown = failed.prefix(5).map { "“\($0.name)”: \($0.message)" }.joined(separator: "\n")
         let more = failed.count > 5 ? "\n…and \(failed.count - 5) more" : ""
-        return "\(failed.count) items couldn’t be copied.\n\n\(shown)\(more)\n\nThey stay in the transfer list, where you can retry them."
+        let what = installs ? "\(failed.count) apps couldn’t be installed" : "\(failed.count) items couldn’t be copied"
+        return "\(what).\n\n\(shown)\(more)\n\nThey stay in the transfer list, where you can retry them."
     }
 
     public func cancel(_ t: Transfer) {
@@ -287,6 +294,7 @@ public final class TransferQueue: ObservableObject {
         guard t.state == .waiting else { return }
         t.state = .running
         t.startedAt = Date()
+        if t.direction == .install { return await install(t) }
         let dest = t.destPath
         let staging = t.stagingPath
 
@@ -372,6 +380,28 @@ public final class TransferQueue: ObservableObject {
         if let error = await moveIntoPlace(t, replacing: exists && !deleteFirst) {
             await remove(t, staging)
             return finish(t, .failed("Couldn’t put the copy in place: \(error)"))
+        }
+        t.transferred = t.total
+        finish(t, .done)
+    }
+
+    /// `adb install -r`: installs the app, or updates it keeping its data. adb streams the .apk
+    /// straight to the package installer, so there's no copy to check or clean up.
+    private func install(_ t: Transfer) async {
+        let src = t.source
+        t.total = await Task.detached { LocalFS.size(URL(fileURLWithPath: src)) }.value
+        let result = await adb.run(["-s", t.serial, "install", "-r", t.source]) { process in
+            DispatchQueue.main.async {
+                t.process = process
+                if t.cancelRequested { process.terminate() }
+            }
+        }
+        if t.cancelRequested { return finish(t, .cancelled) }
+        // Older adb versions exit 0 even when the installer said "Failure [...]".
+        let said = result.output + "\n" + result.error
+        guard result.ok, said.contains("Success"), !said.contains("Failure") else {
+            let reason = said.split(whereSeparator: \.isNewline).last { $0.contains("Failure") }.map(String.init)
+            return finish(t, .failed(reason ?? result.message))
         }
         t.transferred = t.total
         finish(t, .done)

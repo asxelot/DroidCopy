@@ -69,6 +69,13 @@ public struct FakeAdb {
               shell) PATH='\(bin.path)':"$PATH" exec /bin/sh -c "$1" ;;
               push) do_push "$1" "$2" ;;
               pull) do_pull "$1" "$2" ;;
+              install)
+                [ "$1" = "-r" ] && shift
+                case "$1" in
+                  *bad*) echo "Performing Streamed Install"; echo "adb: failed to install $1: Failure [INSTALL_FAILED_INVALID_APK: not an apk]" >&2; exit 1 ;;
+                  *slow*) exec sleep 60 ;;
+                esac
+                mkdir -p '\(root.path)/installed' && cp "$1" '\(root.path)/installed/' && echo "Performing Streamed Install" && echo Success ;;
               *) echo "fake adb: unknown command $cmd" >&2; exit 1 ;;
             esac
             """)
@@ -88,6 +95,9 @@ public struct FakeAdb {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
+
+    /// Where the fake `adb install` puts the .apk files it "installed".
+    public var installedDir: URL { root.appendingPathComponent("installed") }
 
     public func cleanUp() { try? FileManager.default.removeItem(at: root) }
 

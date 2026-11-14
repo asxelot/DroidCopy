@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import DroidCopyCore
 
 struct Crumb {
@@ -1001,8 +1002,70 @@ final class AppModel: ObservableObject {
     func dropOnDevice(_ urls: [URL], into folder: String? = nil) -> Bool {
         let files = urls.filter(\.isFileURL)
         guard !files.isEmpty else { return false }
-        copyToDevice(files, into: folder)
+        // An .apk is usually dropped to install it, but maybe to keep the file: ask.
+        if device != nil, files.contains(where: Self.isAPK) {
+            pendingAPKs = PendingAPKs(urls: files, folder: folder ?? deviceDir)
+        } else {
+            copyToDevice(files, into: folder)
+        }
         return true
+    }
+
+    // MARK: - Installing apps
+
+    /// .apk files dropped on the window, waiting for the person to say Install or Copy.
+    struct PendingAPKs: Identifiable {
+        let id = UUID()
+        let urls: [URL]
+        let folder: String
+        var apks: [URL] { urls.filter(AppModel.isAPK) }
+    }
+    @Published var pendingAPKs: PendingAPKs?
+
+    nonisolated static func isAPK(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() == "apk" && !url.hasDirectoryPath
+            && (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory != true
+    }
+
+    /// The dropped .apk files are installed; anything else dropped with them is copied.
+    func installPending() {
+        guard let p = pendingAPKs else { return }
+        pendingAPKs = nil
+        install(p.apks)
+        let others = p.urls.filter { !Self.isAPK($0) }
+        if !others.isEmpty { copyToDevice(others, into: p.folder) }
+    }
+
+    /// Everything dropped is copied into the folder, .apk files included.
+    func copyPending() {
+        guard let p = pendingAPKs else { return }
+        pendingAPKs = nil
+        copyToDevice(p.urls, into: p.folder)
+    }
+
+    /// `adb install -r` for each .apk, through the transfer list: installs the app, or updates it
+    /// keeping its data.
+    func install(_ apks: [URL]) {
+        guard let d = device else {
+            alertMessage = "Connect a device first."
+            return
+        }
+        queue.add(apks.map {
+            Transfer(direction: .install, serial: d.serial, source: $0.path, destDir: "",
+                     name: $0.lastPathComponent, isDirectory: false, replace: true)
+        })
+    }
+
+    /// File ▸ Install App…
+    func chooseAppsToInstall() {
+        guard device != nil else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "apk") ?? .data]
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Install"
+        panel.message = "Choose apps (.apk files) to install on “\(device?.displayName ?? "the device")”."
+        guard panel.runModal() == .OK else { return }
+        install(panel.urls)
     }
 
     func copyToDevice(_ urls: [URL], into folder: String? = nil) {
@@ -1209,15 +1272,21 @@ final class AppModel: ObservableObject {
         let done = done.filter { !quiet.contains($0.destLabel ?? "") }
         let failed = failed.filter { !quiet.contains($0.destLabel ?? "") }
         guard !done.isEmpty || !failed.isEmpty else { return nil }
-        let toDevice = (done + failed).allSatisfy { $0.direction == .toDevice }
+        let installs = (done + failed).allSatisfy { $0.direction == .install }
+        let toDevice = (done + failed).allSatisfy { $0.direction != .toMac }
         let place = toDevice ? "the device" : "the Mac"
-        let title = failed.isEmpty ? "Copying finished" : "Copying finished with problems"
+        let verb = installs ? "Installing" : "Copying"
+        let title = failed.isEmpty ? "\(verb) finished" : "\(verb) finished with problems"
         var parts: [String] = []
+        func did(_ t: Transfer) -> String { t.direction == .install ? "installed" : "copied to \(place)" }
         if !done.isEmpty {
-            parts.append(done.count == 1 ? "“\(done[0].name)” was copied to \(place)." : "\(done.count) items were copied to \(place).")
+            parts.append(done.count == 1 ? "“\(done[0].name)” was \(did(done[0]))."
+                         : installs ? "\(done.count) apps were installed." : "\(done.count) items were copied to \(place).")
         }
         if !failed.isEmpty {
-            parts.append(failed.count == 1 ? "“\(failed[0].name)” couldn’t be copied." : "\(failed.count) items couldn’t be copied.")
+            let fail = installs ? "installed" : "copied"
+            parts.append(failed.count == 1 ? "“\(failed[0].name)” couldn’t be \(failed[0].direction == .install ? "installed" : "copied")."
+                         : "\(failed.count) items couldn’t be \(fail).")
         }
         return (title, parts.joined(separator: " "))
     }
