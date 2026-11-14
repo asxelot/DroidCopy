@@ -8,6 +8,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Opens the main window again; set by the window itself.
     var reopenWindow: (() -> Void)?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // The toolbar's search field starts out as a magnifier button, as in Finder. Watched from
+        // before the window exists: SwiftUI fills in the toolbar while launching, before
+        // applicationDidFinishLaunching, and the window may not become key (opened in the
+        // background).
+        NotificationCenter.default.addObserver(forName: NSToolbar.willAddItemNotification, object: nil, queue: nil) { note in
+            guard let item = note.userInfo?["item"] as? NSSearchToolbarItem else { return }
+            MainActor.assumeIsolated { CompactSearch.apply(to: item) }
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Notifier.prepare()
         // Closing the window quits the app, like a single-window utility should. Sheets and
@@ -18,17 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // waits on tasks that need the main queue, and a block would be holding it.
             NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
         }
-        // The toolbar's search field starts out as a magnifier button, as in Finder.
-        NotificationCenter.default.addObserver(forName: NSToolbar.willAddItemNotification, object: nil, queue: nil) { note in
-            guard let item = note.userInfo?["item"] as? NSSearchToolbarItem else { return }
-            MainActor.assumeIsolated { CompactSearch.apply(to: item) }
-        }
-        NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: nil) { note in
-            MainActor.assumeIsolated {
-                guard let window = note.object as? NSWindow else { return }
-                for case let item as NSSearchToolbarItem in window.toolbar?.items ?? [] { CompactSearch.apply(to: item) }
-            }
-        }
+        CompactSearch.applyToOpenWindows()
     }
 
     static func isMainWindow(_ window: NSWindow) -> Bool {
@@ -234,6 +235,12 @@ enum CompactSearch {
     /// The open field's width, like Finder's.
     static let openWidth: CGFloat = 240
     static let marker = NSUserInterfaceItemIdentifier("DroidCopy.compactSearch")
+
+    static func applyToOpenWindows() {
+        for window in NSApp.windows {
+            for case let item as NSSearchToolbarItem in window.toolbar?.items ?? [] { apply(to: item) }
+        }
+    }
 
     static func apply(to item: NSSearchToolbarItem) {
         let field = item.searchField
