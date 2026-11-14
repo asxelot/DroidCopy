@@ -75,6 +75,30 @@ public enum Parse {
         return roots
     }
 
+    /// `ip -f inet addr show wlan0`: the device's address on Wi-Fi, from "inet 192.168.1.20/24 …".
+    public static func wifiAddress(_ output: String) -> String? {
+        for line in output.split(whereSeparator: \.isNewline) {
+            let words = line.split(separator: " ")
+            guard let i = words.firstIndex(of: "inet"), i + 1 < words.count else { continue }
+            let addr = words[i + 1].split(separator: "/").first.map(String.init) ?? ""
+            if addr.split(separator: ".").count == 4, !addr.hasPrefix("127.") { return addr }
+        }
+        return nil
+    }
+
+    /// "192.168.1.20" → "192.168.1.20:5555": adb's usual port when none is given. nil if it
+    /// doesn't look like an address.
+    public static func adbAddress(_ input: String, defaultPort: Int = 5555) -> String? {
+        let s = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, !s.contains(" "), !s.contains("/") else { return nil }
+        if let colon = s.lastIndex(of: ":") {
+            let port = s[s.index(after: colon)...]
+            guard let n = Int(port), (1...65535).contains(n), colon != s.startIndex else { return nil }
+            return s
+        }
+        return "\(s):\(defaultPort)"
+    }
+
     /// A `find -iname` pattern matching names that contain `text`, with wildcard characters in
     /// it taken literally. Still needs `shellQuote`.
     public static func containsPattern(_ text: String) -> String {

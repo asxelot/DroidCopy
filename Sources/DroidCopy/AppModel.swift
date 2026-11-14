@@ -260,7 +260,72 @@ final class AppModel: ObservableObject {
         }
         ejectedSerial = d.serial
         disconnect()
-        deviceStatus = "It’s safe to unplug the device."
+        // Over Wi-Fi there's nothing to unplug: end the connection (other connections, and adb
+        // itself, stay).
+        if d.isNetwork {
+            await adb.disconnect(d.serial)
+            ejectedSerial = nil
+            deviceStatus = "Disconnected from “\(d.displayName)” over Wi-Fi."
+        } else {
+            deviceStatus = "It’s safe to unplug the device."
+        }
+    }
+
+    // MARK: - Wi-Fi
+
+    static let wifiAddressKey = "wifiAddress"
+    /// The last address connected to over Wi-Fi, offered next time.
+    var lastWiFiAddress: String { defaults.string(forKey: Self.wifiAddressKey) ?? "" }
+
+    /// With the cable in: makes the device's adb listen on Wi-Fi too (`adb tcpip 5555`), then
+    /// connects to it there. Returns what to tell the person, and whether it worked.
+    func switchToWiFi() async -> (ok: Bool, message: String) {
+        guard let adb, let d = device, !d.isNetwork else { return (false, "Connect the device with a cable first.") }
+        guard let ip = await adb.wifiAddress(d.serial) else {
+            return (false, "“\(d.displayName)” isn’t on Wi-Fi. Connect it to the same Wi-Fi network as this Mac.")
+        }
+        let r = await adb.tcpip(d.serial)
+        guard r.ok else { return (false, "Couldn’t switch to Wi-Fi: \(r.message)") }
+        // adb restarts on the device; it takes a moment before it answers on Wi-Fi.
+        let address = "\(ip):5555"
+        var last = ""
+        for attempt in 0..<5 {
+            try? await Task.sleep(nanoseconds: attempt == 0 ? 1_500_000_000 : 1_000_000_000)
+            let c = await adb.connect(address)
+            if c.ok {
+                defaults.set(address, forKey: Self.wifiAddressKey)
+                await pollDevices()
+                return (true, "Connected to \(address). You can unplug the cable.")
+            }
+            last = c.message
+        }
+        return (false, "Couldn’t connect to \(address): \(last)")
+    }
+
+    /// Connects to a device's adb on Wi-Fi ("192.168.1.20:5555", or the address and port shown
+    /// under Wireless debugging).
+    func connectWiFi(_ input: String) async -> (ok: Bool, message: String) {
+        guard let adb else { return (false, "adb isn’t installed.") }
+        guard let address = Parse.adbAddress(input) else { return (false, "Enter an address like 192.168.1.20:5555.") }
+        let c = await adb.connect(address)
+        guard c.ok else { return (false, c.message) }
+        defaults.set(address, forKey: Self.wifiAddressKey)
+        // An ejected device may be the one asked for; the person wants it now.
+        ejectedSerial = nil
+        await pollDevices()
+        return (true, "Connected to \(address).")
+    }
+
+    /// Pairs with a device using the code from its "Pair device with pairing code" screen.
+    func pairWiFi(_ input: String, code: String) async -> (ok: Bool, message: String) {
+        guard let adb else { return (false, "adb isn’t installed.") }
+        guard let address = Parse.adbAddress(input, defaultPort: 0), !address.hasSuffix(":0") else {
+            return (false, "Enter the IP address and port shown with the pairing code, like 192.168.1.20:37099.")
+        }
+        let code = code.trimmingCharacters(in: .whitespaces)
+        guard !code.isEmpty else { return (false, "Enter the pairing code shown on the device.") }
+        let p = await adb.pair(address, code: code)
+        return p.ok ? (true, "Paired. Now connect to the address and port shown under Wireless debugging.") : (false, p.message)
     }
 
     /// Uses the ejected device again without unplugging it.

@@ -10,6 +10,7 @@ final class WindowState: ObservableObject {
     @Published var deleting: [FileItem] = []
     @Published var goingToFolder = false
     @Published var goToPath = ""
+    @Published var connectingWiFi = false
     @Published var showPathBar: Bool { didSet { defaults.set(showPathBar, forKey: "showPathBar") } }
     @Published var showStatusBar: Bool { didSet { defaults.set(showStatusBar, forKey: "showStatusBar") } }
     private let defaults: UserDefaults
@@ -103,6 +104,9 @@ struct ContentView: View {
         } message: { Text($0) }
         .sheet(item: $model.info) { info in
             InfoSheet(info: info) { model.info = nil }
+        }
+        .sheet(isPresented: $ui.connectingWiFi) {
+            WiFiSheet()
         }
         .sheet(isPresented: $ui.goingToFolder) {
             GoToFolderSheet()
@@ -402,6 +406,7 @@ struct FolderView: View {
                 if model.ejectedSerial != nil {
                     Button("Reconnect") { Task { await model.reconnect() } }
                 }
+                Button("Connect over Wi-Fi…") { ui.connectingWiFi = true }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {

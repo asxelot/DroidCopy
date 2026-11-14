@@ -87,6 +87,8 @@ public struct DeviceInfo: Hashable, Sendable {
     }
 
     public var isReady: Bool { state == "device" }
+    /// Connected over Wi-Fi ("192.168.1.20:5555", or an mDNS name from Wireless debugging).
+    public var isNetwork: Bool { serial.contains(":") || serial.contains("._adb-tls-connect.") }
     public var displayName: String { model?.replacingOccurrences(of: "_", with: " ") ?? serial }
 }
 

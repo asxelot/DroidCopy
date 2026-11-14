@@ -155,7 +155,7 @@ public final class Adb: @unchecked Sendable {
         addr.sin_port = port.bigEndian
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
         let r = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
         }
         return r == 0
     }
@@ -187,6 +187,44 @@ public final class Adb: @unchecked Sendable {
 
     public func devices() async -> [DeviceInfo] {
         Parse.devices(await run(["devices", "-l"], timeout: quickTimeout).output)
+    }
+
+    // MARK: Wi-Fi
+
+    /// `adb connect`. adb exits 0 even when it couldn't connect, so the answer is read from what it
+    /// says ("connected to …", "already connected to …", "failed to connect to …").
+    public func connect(_ address: String) async -> (ok: Bool, message: String) {
+        let r = await run(["connect", address], timeout: quickTimeout)
+        let said = (r.output + "\n" + r.error).trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = said.lowercased()
+        let ok = r.ok && lower.contains("connected to") && !lower.contains("failed") && !lower.contains("cannot")
+            && !lower.contains("unable")
+        return (ok, r.timedOut ? "The device didn’t answer at \(address)." : said.split(whereSeparator: \.isNewline).last.map(String.init) ?? r.message)
+    }
+
+    /// `adb pair` with the code from the device's "Pair device with pairing code" screen.
+    public func pair(_ address: String, code: String) async -> (ok: Bool, message: String) {
+        let r = await run(["pair", address, code], timeout: quickTimeout)
+        let said = (r.output + "\n" + r.error).trimmingCharacters(in: .whitespacesAndNewlines)
+        let ok = r.ok && said.contains("Successfully paired")
+        return (ok, r.timedOut ? "The device didn’t answer at \(address)." : said.split(whereSeparator: \.isNewline).last.map(String.init) ?? r.message)
+    }
+
+    /// `adb disconnect` of one Wi-Fi device. Other connections, and the server, are left alone.
+    @discardableResult
+    public func disconnect(_ address: String) async -> RunResult {
+        await run(["disconnect", address], timeout: quickTimeout)
+    }
+
+    /// `adb tcpip`: the device's adb also listens on Wi-Fi, on `port`, until it restarts. Its USB
+    /// connection drops for a moment while adb restarts on the device.
+    public func tcpip(_ serial: String, port: Int = 5555) async -> RunResult {
+        await run(["-s", serial, "tcpip", String(port)], timeout: quickTimeout)
+    }
+
+    /// The device's address on Wi-Fi, or nil when it isn't on Wi-Fi.
+    public func wifiAddress(_ serial: String) async -> String? {
+        Parse.wifiAddress(await shell(serial, "ip -f inet addr show wlan0", timeout: quickTimeout).output)
     }
 
     public func shell(_ serial: String, _ command: String, timeout: TimeInterval? = nil) async -> RunResult {

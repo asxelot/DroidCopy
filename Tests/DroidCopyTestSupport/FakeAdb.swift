@@ -39,6 +39,11 @@ public struct FakeAdb {
               /usr/bin/stat $L -f "$bsd" "$f"
             done
             """)
+        try Self.write(bin.appendingPathComponent("ip"), """
+            #!/bin/sh
+            echo "10: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500"
+            echo "    inet 192.168.1.50/24 brd 192.168.1.255 scope global wlan0"
+            """)
         if let freeKB {
             try Self.write(bin.appendingPathComponent("df"), """
                 #!/bin/sh
@@ -69,6 +74,15 @@ public struct FakeAdb {
               shell) PATH='\(bin.path)':"$PATH" exec /bin/sh -c "$1" ;;
               push) do_push "$1" "$2" ;;
               pull) do_pull "$1" "$2" ;;
+              connect)
+                case "$1" in
+                  *:5555) grep -q "^$1 " '\(devicesFile.path)' && { echo "already connected to $1"; exit 0; }
+                          echo "$1  device product:x model:Fake_Phone" >> '\(devicesFile.path)'; echo "connected to $1" ;;
+                  *) echo "failed to connect to '$1': Connection refused" ;;
+                esac ;;
+              disconnect) grep -v "^$1 " '\(devicesFile.path)' > '\(devicesFile.path).new'; mv '\(devicesFile.path).new' '\(devicesFile.path)'; echo "disconnected $1" ;;
+              pair) [ "$2" = "123456" ] && echo "Successfully paired to $1 [guid=adb-FAKE]" || { echo "Failed: Wrong password or connection was dropped."; exit 1; } ;;
+              tcpip) echo "restarting in TCP mode port: $1"; touch '\(root.path)'/tcpip-"$1" ;;
               install)
                 [ "$1" = "-r" ] && shift
                 case "$1" in

@@ -153,6 +153,7 @@ struct FinderCommands: Commands {
                 .disabled(model.selectedItems.isEmpty)
             Button("Install App…") { model.chooseAppsToInstall() }
                 .disabled(model.device == nil)
+            Button("Connect over Wi-Fi…") { ui.connectingWiFi = true }
             Divider()
             Button("Add to Sidebar") { model.addToSidebar(model.selectedItems) }
                 .keyboardShortcut("t", modifiers: [.command, .control])
