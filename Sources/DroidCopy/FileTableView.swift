@@ -518,16 +518,28 @@ struct FileTable: NSViewRepresentable {
     }
 }
 
-/// A row's drag: a file promise for Finder, plus the device path for moves within the device.
+/// A row's drag: a file promise for Finder, the device path for moves within the device, and the
+/// device path as text, escaped for the shell, which is what Terminal types when it's dropped there.
 final class DevicePromiseProvider: NSFilePromiseProvider {
     override func writableTypes(for pasteboard: NSPasteboard) -> [NSPasteboard.PasteboardType] {
-        super.writableTypes(for: pasteboard) + [.droidcopyItems]
+        super.writableTypes(for: pasteboard) + [.droidcopyItems, .string]
     }
 
     override func pasteboardPropertyList(forType type: NSPasteboard.PasteboardType) -> Any? {
-        guard type == .droidcopyItems else { return super.pasteboardPropertyList(forType: type) }
-        guard let item = userInfo as? FileItem else { return nil }
-        return try? JSONEncoder().encode(DraggedItem(path: item.path, isDirectory: item.isDirectory))
+        guard let item = userInfo as? FileItem else { return super.pasteboardPropertyList(forType: type) }
+        switch type {
+        case .droidcopyItems:
+            return try? JSONEncoder().encode(DraggedItem(path: item.path, isDirectory: item.isDirectory))
+        case .string:
+            return Self.terminalText(for: item.path)
+        default:
+            return super.pasteboardPropertyList(forType: type)
+        }
+    }
+
+    /// Like a file dragged from Finder: the escaped path and a space, so several in a row stay apart.
+    static func terminalText(for path: String) -> String {
+        Parse.shellEscaped(path) + " "
     }
 }
 

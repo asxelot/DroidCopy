@@ -81,6 +81,11 @@ rule as copies from the Mac.
   files, dragging or **Copy to Mac…** is better because they don't make that extra copy.
 - **Copy to Mac…** on the right-click menu asks for a folder and copies there.
 
+**Paths in Terminal:** drag items into a Terminal window to type their device paths, escaped for
+the shell the way Terminal does for files from Finder (`/storage/7EF7-7423/ROMs/Fire\ Emblem.nsp`).
+They're ready to use in `adb shell` commands. Nothing is copied. Other apps that take dropped text
+get the paths too.
+
 **Other actions**, from the File menu, the toolbar's Action button or the right-click menu:
 - **New Folder** (⇧⌘N) makes "untitled folder" and lets you name it.
 - **Rename:** press Return, as in Finder, and edit the name in place.

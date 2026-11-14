@@ -4,6 +4,16 @@ import Testing
 import DroidCopyTestSupport
 
 @Suite struct ParseTests {
+    @Test func shellEscapingMatchesWhatTerminalTypesForADroppedFile() {
+        #expect(Parse.shellEscaped("/storage/emulated/0/Download/plain_name-1.2.txt") == "/storage/emulated/0/Download/plain_name-1.2.txt")
+        #expect(Parse.shellEscaped("/storage/7EF7-7423/ROMs/Fire Emblem [0100A6301214E800][US].nsp")
+                == #"/storage/7EF7-7423/ROMs/Fire\ Emblem\ \[0100A6301214E800\]\[US\].nsp"#)
+        #expect(Parse.shellEscaped("/a/it's (1) & $x;!`*?\"|<>{}#") == ##"/a/it\'s\ \(1\)\ \&\ \$x\;\!\`\*\?\"\|\<\>\{\}\#"##)
+        #expect(Parse.shellEscaped("/a/Покемон é.gb") == #"/a/Покемон\ é.gb"#, "letters of any script stay as they are")
+        #expect(Parse.shellEscaped("~x/a~b") == #"\~x/a~b"#)
+        #expect(Parse.shellEscaped("/a/two\nlines") == "'/a/two\nlines'")
+    }
+
     @Test func devicesSkipsHeaderAndDaemonLines() {
         let out = """
         * daemon not running; starting now at tcp:5037

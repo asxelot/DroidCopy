@@ -64,6 +64,22 @@ public enum Parse {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    /// `path` escaped the way Terminal types a file dropped onto it: a backslash before each
+    /// character the shell treats specially. A name with a line break is single-quoted instead,
+    /// because a backslash before a newline would join the lines.
+    public static func shellEscaped(_ path: String) -> String {
+        if path.contains(where: \.isNewline) { return shellQuote(path) }
+        let plain = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "/._-+,:@%^=~"))
+        var out = ""
+        for ch in path {
+            let isPlain = ch.unicodeScalars.allSatisfy { plain.contains($0) }
+            // A leading ~ would expand to the Mac's home folder.
+            if !isPlain || (ch == "~" && out.isEmpty) { out.append("\\") }
+            out.append(ch)
+        }
+        return out
+    }
+
     public static func join(_ dir: String, _ name: String) -> String {
         dir.hasSuffix("/") ? dir + name : dir + "/" + name
     }

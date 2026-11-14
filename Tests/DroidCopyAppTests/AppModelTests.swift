@@ -521,6 +521,17 @@ final class Harness {
         #expect(c.tableView(table, pasteboardWriterForRow: 9) == nil)
     }
 
+    @Test func rowsAlsoCarryTheirShellEscapedPathForTerminal() throws {
+        let odd = FileItem(name: "Fire Emblem [US].nsp", path: "/storage/7EF7-7423/ROMs/Fire Emblem [US].nsp",
+                           isDirectory: false, size: 2, modified: nil)
+        let (c, table) = coordinator([odd])
+        let row = try #require(c.tableView(table, pasteboardWriterForRow: 0) as? NSFilePromiseProvider)
+        #expect(row.writableTypes(for: .general).contains(.string))
+        #expect(row.pasteboardPropertyList(forType: .string) as? String
+                == #"/storage/7EF7-7423/ROMs/Fire\ Emblem\ \[US\].nsp "#)
+        #expect(row.writableTypes(for: .general).contains(.droidcopyItems), "moves within the device still work")
+    }
+
     @Test func fulfillingAPromiseAsksTheAppToDeliver() async throws {
         var asked: (FileItem, URL)?
         let (c, table) = coordinator(items) { item, url, done in asked = (item, url); done(nil) }
