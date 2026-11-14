@@ -42,6 +42,8 @@ struct FileTableActions {
     var addToSidebar: ([FileItem]) -> Void = { _ in }
     var copyPath: ([FileItem]) -> Void = { _ in }
     var newFolder: () -> Void = {}
+    /// Search results: open the folder an item is in, with it selected.
+    var showInFolder: (FileItem) -> Void = { _ in }
 }
 
 /// The device file list. An AppKit table because SwiftUI's `Table` can't hand files to Finder:
@@ -54,7 +56,20 @@ struct FileTable: NSViewRepresentable {
     var dimmed: Set<String> = []
     /// A row to start renaming in place.
     var renaming: String?
+    /// Searching subfolders of this folder: shows the Where column, each item's folder from here.
+    var whereRoot: String?
+    /// What to call `whereRoot` in the Where column ("ROMs").
+    var whereRootName = ""
     let actions: FileTableActions
+
+    /// "ROMs › switch › Mods": the folder `item` is in, from `root` down.
+    static func location(of item: FileItem, under root: String, rootName: String) -> String {
+        let parent = Parse.parent(item.path)
+        guard parent != root else { return rootName }
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        guard parent.hasPrefix(prefix) else { return parent }
+        return ([rootName] + parent.dropFirst(prefix.count).split(separator: "/").map(String.init)).joined(separator: " › ")
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -84,6 +99,11 @@ struct FileTable: NSViewRepresentable {
         }
         // Finder's list view columns, in Finder's order.
         column("name", "Name", width: 320, min: 120, max: 10_000, ascending: true)
+        column("where", "Where", width: 220, min: 80, max: 600, ascending: true)
+        if let c = table.tableColumns.first(where: { $0.identifier.rawValue == "where" }) {
+            c.sortDescriptorPrototype = nil
+            c.isHidden = true
+        }
         column("modified", "Date Modified", width: 170, min: 90, max: 260, ascending: false)
         column("size", "Size", width: 80, min: 60, max: 120, ascending: false)
         column("kind", "Kind", width: 150, min: 70, max: 300, ascending: true)
@@ -123,6 +143,7 @@ struct FileTable: NSViewRepresentable {
         private(set) var rows: [FileItem] = []
         private var shownItems: [FileItem] = []
         private var shownDimmed: Set<String> = []
+        private var shownWhere: String?
         private var applyingSelection = false
         /// The row being renamed in place, and whether Esc cancelled it.
         private(set) var editing: FileItem?
@@ -141,6 +162,11 @@ struct FileTable: NSViewRepresentable {
 
         func update() {
             guard let table else { return }
+            if parent.whereRoot != shownWhere {
+                shownWhere = parent.whereRoot
+                table.tableColumns.first { $0.identifier.rawValue == "where" }?.isHidden = parent.whereRoot == nil
+                shownItems = [] // reload: the Where text depends on the root
+            }
             if parent.items != shownItems || parent.dimmed != shownDimmed {
                 shownItems = parent.items
                 shownDimmed = parent.dimmed
@@ -229,6 +255,10 @@ struct FileTable: NSViewRepresentable {
                 cell.textField?.stringValue = item.isDirectory ? "--" : Fmt.bytes(item.size)
             case "kind":
                 cell.textField?.stringValue = item.kind
+            case "where":
+                cell.textField?.stringValue = parent.whereRoot.map {
+                    FileTable.location(of: item, under: $0, rootName: parent.whereRootName)
+                } ?? ""
             default:
                 cell.textField?.stringValue = item.modified.map(Fmt.date) ?? ""
             }
@@ -398,6 +428,9 @@ struct FileTable: NSViewRepresentable {
                 add(files.count == 1 ? "Quick Look “\(files[0].name)”" : "Quick Look \(files.count) Items") { [weak self] in
                     self?.showPreview(files)
                 }
+            }
+            if parent.whereRoot != nil, targets.count == 1 {
+                add("Show in Enclosing Folder") { actions.showInFolder(targets[0]) }
             }
             menu.addItem(.separator())
             add("Get Info", "i") { actions.getInfo(targets) }

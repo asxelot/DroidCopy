@@ -211,6 +211,27 @@ public final class Adb: @unchecked Sendable {
         return Parse.listing(r.output, showHidden: showHidden)
     }
 
+    /// Items anywhere inside `dir` whose names contain `text`, ignoring case, at most `limit` of
+    /// them. `truncated` says there were more. Hidden items, and everything inside hidden
+    /// folders, are skipped unless `showHidden`.
+    public func search(_ serial: String, in dir: String, for text: String, showHidden: Bool = false,
+                       limit: Int = 2000) async throws -> (items: [FileItem], truncated: Bool) {
+        let q = Parse.shellQuote(dir)
+        let pattern = Parse.shellQuote(Parse.containsPattern(text))
+        let skipHidden = showHidden ? "" : "\\( -name '.*' -prune \\) -o "
+        let r = await shell(serial, """
+            [ -d \(q) ] || { echo 'Folder not found on the device' >&2; exit 2; }; \
+            find \(q) -mindepth 1 \(skipHidden)\\( -iname \(pattern) -exec stat -L -c '%F/%s/%Y/%n' {} + \\) 2>/dev/null \
+            | head -n \(limit + 1); true
+            """, timeout: slowTimeout)
+        if r.timedOut { throw AdbError.notResponding }
+        guard r.ok else { throw AdbError(r.message) }
+        let lines = r.output.split(separator: "\n", omittingEmptySubsequences: true)
+        let truncated = lines.count > limit
+        let items = Parse.listing(lines.prefix(limit).joined(separator: "\n"), showHidden: true)
+        return (items, truncated)
+    }
+
     /// Where Android mounts internal storage and cards. A temp folder in tests.
     public var storageRoot = "/storage"
 

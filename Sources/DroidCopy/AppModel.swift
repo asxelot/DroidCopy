@@ -85,7 +85,25 @@ final class AppModel: ObservableObject {
     @Published private(set) var backStack: [String] = []
     @Published private(set) var forwardStack: [String] = []
     /// Narrows the folder being shown to names containing this.
-    @Published var searchText = ""
+    @Published var searchText = "" { didSet { if searchText != oldValue { scheduleSearch() } } }
+    /// Where search looks: this folder only (instant), or this folder and everything inside it
+    /// (asks the device with `find`).
+    enum SearchScope: String { case folder, subfolders }
+    @Published var searchScope: SearchScope {
+        didSet {
+            guard searchScope != oldValue else { return }
+            defaults.set(searchScope.rawValue, forKey: Self.searchScopeKey)
+            scheduleSearch(now: true)
+        }
+    }
+    /// Results of a subfolder search; nil until the first one arrives.
+    @Published private(set) var searchResults: [FileItem]?
+    @Published private(set) var searching = false
+    /// The subfolder search found more than it shows.
+    @Published private(set) var searchTruncated = false
+    @Published private(set) var searchError: String?
+    private var searchTask: Task<Void, Never>?
+    static let searchLimit = 2000
     @Published var showHidden: Bool {
         didSet {
             guard showHidden != oldValue else { return }
@@ -147,6 +165,7 @@ final class AppModel: ObservableObject {
         .appendingPathComponent("DroidCopy")
     nonisolated static let defaultClipboardCache = cacheRoot.appendingPathComponent("Clipboard")
     private static let showHiddenKey = "showHiddenFiles"
+    private static let searchScopeKey = "searchScope"
     static let checkContentsKey = "checkContents"
 
     init(adb: Adb? = Adb.locate(), pasteboard: NSPasteboard = .general,
@@ -160,6 +179,7 @@ final class AppModel: ObservableObject {
         self.defaults = defaults
         self.showHidden = defaults.bool(forKey: Self.showHiddenKey)
         self.checkContents = defaults.bool(forKey: Self.checkContentsKey)
+        self.searchScope = defaults.string(forKey: Self.searchScopeKey).flatMap(SearchScope.init(rawValue:)) ?? .folder
         self.queue = TransferQueue(adb: adb ?? Adb(path: "/usr/bin/false"))
         queue.checkContents = checkContents
         queue.onFinished = { [weak self] t in self?.transferFinished(t) }
@@ -339,10 +359,65 @@ final class AppModel: ObservableObject {
         goDevice(path)
     }
 
-    /// Items in the folder, narrowed by the search field.
+    /// Items in the folder, narrowed by the search field; or, when searching subfolders, what
+    /// the device found.
     var visibleItems: [FileItem] {
-        let q = searchText.trimmingCharacters(in: .whitespaces)
-        return q.isEmpty ? deviceItems : deviceItems.filter { $0.name.localizedCaseInsensitiveContains(q) }
+        let q = searchQuery
+        if q.isEmpty { return deviceItems }
+        if searchScope == .subfolders { return searchResults ?? [] }
+        return deviceItems.filter { $0.name.localizedCaseInsensitiveContains(q) }
+    }
+
+    var searchQuery: String { searchText.trimmingCharacters(in: .whitespaces) }
+
+    /// Showing subfolder search results rather than the folder.
+    var searchingSubfolders: Bool { searchScope == .subfolders && !searchQuery.isEmpty }
+
+    /// Starts a subfolder search for the current text, after a short pause so typing a word
+    /// doesn't search for each letter. Clears the results when there's nothing to search for.
+    func scheduleSearch(now: Bool = false) {
+        searchTask?.cancel()
+        guard searchingSubfolders, let adb, let d = device, !deviceDir.isEmpty else {
+            searchTask = nil
+            searchResults = nil
+            searching = false
+            searchTruncated = false
+            searchError = nil
+            return
+        }
+        let q = searchQuery, dir = deviceDir, hidden = showHidden
+        searching = true
+        searchTask = Task {
+            if !now { try? await Task.sleep(nanoseconds: 300_000_000) }
+            guard !Task.isCancelled else { return }
+            let result: Result<(items: [FileItem], truncated: Bool), Error>
+            do { result = .success(try await adb.search(d.serial, in: dir, for: q, showHidden: hidden, limit: Self.searchLimit)) }
+            catch { result = .failure(error) }
+            guard !Task.isCancelled, q == searchQuery, dir == deviceDir, searchScope == .subfolders else { return }
+            switch result {
+            case .success(let found):
+                searchResults = found.items
+                searchTruncated = found.truncated
+                searchError = nil
+                let ids = Set(found.items.map(\.id))
+                deviceSelection = deviceSelection.filter { ids.contains($0) }
+            case .failure(let error):
+                searchResults = []
+                searchTruncated = false
+                searchError = error.localizedDescription
+            }
+            searching = false
+        }
+    }
+
+    /// For tests: waits for the subfolder search in flight.
+    func searchSettled() async { await searchTask?.value }
+
+    /// Search results come from all over: shows the item in the folder it's in, selected.
+    func showInEnclosingFolder(_ item: FileItem) {
+        let parent = Parse.parent(item.path)
+        goDevice(parent)
+        selectAfterLoad = [item.path]
     }
 
     /// Selected items, in list order.
@@ -404,8 +479,11 @@ final class AppModel: ObservableObject {
             deviceItems = items
             deviceError = nil
             let ids = Set(items.map(\.id))
-            deviceSelection = deviceSelection.union(selectAfterLoad).filter { ids.contains($0) }
-            selectAfterLoad = []
+            // Selected search results are in other folders; the search's own refresh keeps them.
+            if !searchingSubfolders {
+                deviceSelection = deviceSelection.union(selectAfterLoad).filter { ids.contains($0) }
+                selectAfterLoad = []
+            }
             defaults.set(dir, forKey: lastFolderKey(d.serial))
         case .failure(let error):
             deviceItems = []
@@ -414,6 +492,8 @@ final class AppModel: ObservableObject {
         deviceFree = free
         // Still loading if a newer load is on its way.
         deviceLoading = generation != loadsStarted
+        // Something changed or Refresh was chosen: search again, so results aren't stale.
+        if searchingSubfolders { scheduleSearch(now: true) }
     }
 
     var deviceCanGoUp: Bool {

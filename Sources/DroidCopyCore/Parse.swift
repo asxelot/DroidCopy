@@ -75,6 +75,17 @@ public enum Parse {
         return roots
     }
 
+    /// A `find -iname` pattern matching names that contain `text`, with wildcard characters in
+    /// it taken literally. Still needs `shellQuote`.
+    public static func containsPattern(_ text: String) -> String {
+        var out = "*"
+        for ch in text {
+            if "*?[]\\".contains(ch) { out.append("\\") }
+            out.append(ch)
+        }
+        return out + "*"
+    }
+
     /// Quote for the device's /bin/sh.
     public static func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"

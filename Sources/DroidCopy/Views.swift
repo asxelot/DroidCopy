@@ -342,6 +342,10 @@ struct BrowserView: View {
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
+                if model.device != nil && !model.searchQuery.isEmpty {
+                    SearchScopeBar()
+                    Divider()
+                }
                 FolderView().frame(maxHeight: .infinity)
                 if model.device != nil {
                     if ui.showPathBar {
@@ -406,10 +410,26 @@ struct FolderView: View {
                 selection: $model.deviceSelection,
                 dimmed: model.cutPaths,
                 renaming: model.renamingPath,
+                whereRoot: model.searchingSubfolders ? model.deviceDir : nil,
+                whereRootName: model.folderTitle,
                 actions: actions
             )
             .overlay {
-                if let error = model.deviceError {
+                if model.searchingSubfolders {
+                    if let error = model.searchError {
+                        ContentUnavailableView {
+                            Label("Couldn’t Search", systemImage: "exclamationmark.triangle")
+                        } description: {
+                            Text(error)
+                        } actions: {
+                            Button("Try Again") { model.scheduleSearch(now: true) }
+                        }
+                    } else if model.searchResults == nil {
+                        ProgressView("Searching…")
+                    } else if model.visibleItems.isEmpty && !model.searching {
+                        ContentUnavailableView.search(text: model.searchText)
+                    }
+                } else if let error = model.deviceError {
                     ContentUnavailableView {
                         Label("Can’t Open This Folder", systemImage: "exclamationmark.triangle")
                     } description: {
@@ -458,8 +478,43 @@ struct FolderView: View {
             duplicate: { items in Task { await model.duplicate(items) } },
             addToSidebar: model.addToSidebar,
             copyPath: model.copyPaths,
-            newFolder: { Task { await model.newFolder() } }
+            newFolder: { Task { await model.newFolder() } },
+            showInFolder: model.showInEnclosingFolder
         )
+    }
+}
+
+/// Shown while searching, like Finder's bar under the toolbar: search just this folder (instant),
+/// or this folder and every folder inside it (asks the device).
+struct SearchScopeBar: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Search:").foregroundStyle(.secondary)
+            Picker("Search", selection: $model.searchScope) {
+                Text("“\(model.folderTitle)”").tag(AppModel.SearchScope.folder)
+                Text("“\(model.folderTitle)” and Subfolders").tag(AppModel.SearchScope.subfolders)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .fixedSize()
+            Spacer(minLength: 8)
+            if model.searchingSubfolders {
+                if model.searching {
+                    ProgressView().controlSize(.small)
+                    Text("Searching…").foregroundStyle(.secondary)
+                } else if model.searchTruncated {
+                    Text("Showing the first \(AppModel.searchLimit.formatted()) matches").foregroundStyle(.secondary)
+                } else if let n = model.searchResults?.count {
+                    Text(n == 1 ? "1 match" : "\(n.formatted()) matches").foregroundStyle(.secondary)
+                }
+            }
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 10)
+        .frame(height: 30)
     }
 }
 
