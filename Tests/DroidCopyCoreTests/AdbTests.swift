@@ -287,7 +287,7 @@ import DroidCopyTestSupport
         try writeFile(fake.path, """
             #!/bin/sh
             [ "$1" = start-server ] || exit 1
-            nohup /usr/bin/nc -lk 127.0.0.1 \(port) >/dev/null 2>&1 &
+            nohup /usr/bin/perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => \(port), Listen => 5, ReuseAddr => 1) or die; while (1) { close($s->accept) }' >/dev/null 2>&1 &
             echo $! > '\(pidFile)'
             """)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
