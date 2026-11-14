@@ -7,7 +7,8 @@ a Retroid Pocket 5, but works with any Android device that has USB debugging on.
 
 ## What you need
 
-- macOS 14 or later.
+- macOS 14 or later. The ready-made download is for Apple silicon Macs; on an Intel Mac, build it
+  from source (below).
 - `adb`. The easiest way to get it is [Homebrew](https://brew.sh):
 
   ```sh
@@ -18,9 +19,40 @@ a Retroid Pocket 5, but works with any Android device that has USB debugging on.
   `~/Library/Android/sdk/platform-tools`. If yours is somewhere else, start the app with
   `DROIDCOPY_ADB=/path/to/adb`. If adb isn't found, the window shows the install command with a
   copy button.
-- USB debugging turned on on the device, and the "Allow USB debugging" prompt accepted.
+- USB debugging turned on on the device, and the "Allow USB debugging" prompt accepted (see
+  below).
 
-## Building and installing
+## Installing
+
+1. Download `DroidCopy-1.0.zip` from the
+   [latest release](https://github.com/asxelot/DroidCopy/releases/latest).
+2. Open the zip and drag `DroidCopy.app` into **Applications**.
+3. Open DroidCopy. The app isn't notarized by Apple, so the first time macOS refuses to open it.
+   Go to **System Settings ▸ Privacy & Security**, scroll down to the message about DroidCopy,
+   click **Open Anyway** and confirm. After that it opens normally.
+
+   Or, instead of step 3, run this once in Terminal:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/DroidCopy.app
+   ```
+
+To update, quit DroidCopy and replace the app in Applications with the new one.
+
+### Turning on USB debugging
+
+On the Android device:
+
+1. Open **Settings ▸ About** (on some devices **Settings ▸ About phone**) and tap **Build
+   number** seven times, until it says you're a developer.
+2. Go to **Settings ▸ System ▸ Developer options** and turn on **USB debugging**.
+3. Connect the device to the Mac with a USB cable that carries data, not only power. When the
+   device asks "Allow USB debugging?", tick **Always allow from this computer** and tap
+   **Allow**.
+
+If DroidCopy says the device isn't authorized, unlock the device and look for that prompt.
+
+## Building from source
 
 Only the Xcode Command Line Tools are needed; full Xcode isn't.
 
