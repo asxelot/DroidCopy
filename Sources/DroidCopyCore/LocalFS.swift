@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum LocalFS {
@@ -32,6 +33,40 @@ public enum LocalFS {
             if v?.isRegularFile == true { total += Int64(v?.fileSize ?? 0) }
         }
         return total
+    }
+
+    /// MD5 of a file (keyed "."), or of every file inside a folder (keyed "./sub/name"), the same
+    /// shape as `Adb.checksums`. Follows a symlink at `url`, like adb push does. nil if a file
+    /// couldn't be read or `cancelled` turned true.
+    public static func checksums(_ url: URL, cancelled: @Sendable () -> Bool = { false }) -> [String: String]? {
+        let url = url.resolvingSymlinksInPath()
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
+        if !isDir.boolValue { return md5(url, cancelled: cancelled).map { [".": $0] } }
+        var sums: [String: String] = [:]
+        let base = url.path.hasSuffix("/") ? url.path : url.path + "/"
+        let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey])
+        while let f = e?.nextObject() as? URL {
+            guard (try? f.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
+            guard let sum = md5(f, cancelled: cancelled) else { return nil }
+            let path = f.resolvingSymlinksInPath().path
+            sums["./" + (path.hasPrefix(base) ? String(path.dropFirst(base.count)) : f.lastPathComponent)] = sum
+        }
+        return sums
+    }
+
+    static func md5(_ url: URL, cancelled: @Sendable () -> Bool) -> String? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        var hash = Insecure.MD5()
+        while true {
+            if cancelled() { return nil }
+            let chunk: Data
+            do { chunk = try h.read(upToCount: 4 << 20) ?? Data() } catch { return nil } // nil at the end
+            if chunk.isEmpty { break }
+            hash.update(data: chunk)
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     public static func freeBytes(_ dir: URL) -> Int64? {

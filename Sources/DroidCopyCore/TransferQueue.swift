@@ -1,5 +1,14 @@
 import Foundation
 
+/// Set once to ask work running off the main actor (hashing a file on the Mac) to stop.
+public final class StopFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+    public init() {}
+    public func stop() { lock.lock(); stopped = true; lock.unlock() }
+    public var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+}
+
 @MainActor
 public final class Transfer: ObservableObject, Identifiable {
     public enum Direction { case toDevice, toMac }
@@ -34,6 +43,9 @@ public final class Transfer: ObservableObject, Identifiable {
     @Published public var total: Int64 = 0
     @Published public var transferred: Int64 = 0
     @Published public var bytesPerSecond: Double = 0
+    /// Copied, and being compared with the original by checksum.
+    @Published public var checking = false
+    nonisolated public let stopFlag = StopFlag()
     public var startedAt: Date?
     public var finishedAt: Date?
     public var process: Process?
@@ -92,6 +104,10 @@ public final class TransferQueue: ObservableObject {
 
     private let adb: Adb
     private var busy = false
+
+    /// After the size check, also compare each copy with its original by MD5. Off by default:
+    /// it reads everything once more on both sides.
+    public var checkContents = false
 
     /// True when copying will take, or has taken, more than `progressDelay`: right away if the
     /// batch's size at the speed seen so far says so, otherwise once it has run that long. Quick
@@ -208,6 +224,7 @@ public final class TransferQueue: ObservableObject {
             finish(t, .cancelled)
         case .running:
             t.cancelRequested = true
+            t.stopFlag.stop()
             t.process?.terminate()
         default:
             break
@@ -347,12 +364,46 @@ public final class TransferQueue: ObservableObject {
             }
         }
 
+        if checkContents, let problem = await checkContent(t) {
+            await remove(t, staging)
+            return finish(t, t.cancelRequested ? .cancelled : .failed(problem))
+        }
+
         if let error = await moveIntoPlace(t, replacing: exists && !deleteFirst) {
             await remove(t, staging)
             return finish(t, .failed("Couldn’t put the copy in place: \(error)"))
         }
         t.transferred = t.total
         finish(t, .done)
+    }
+
+    /// Compares the copy (still under its hidden name) with the original by MD5, on the device
+    /// and on the Mac at the same time. Returns why it failed, or nil when they match.
+    private func checkContent(_ t: Transfer) async -> String? {
+        t.checking = true
+        defer { t.checking = false }
+        let devicePath = t.direction == .toDevice ? t.stagingPath : t.source
+        let macPath = t.direction == .toDevice ? t.source : t.stagingPath
+        let flag = t.stopFlag
+        async let deviceSums = adb.checksums(t.serial, devicePath) { process in
+            DispatchQueue.main.async {
+                t.process = process
+                if t.cancelRequested { process.terminate() }
+            }
+        }
+        let macSums = await Task.detached {
+            LocalFS.checksums(URL(fileURLWithPath: macPath), cancelled: { flag.isStopped })
+        }.value
+        let device = await deviceSums
+        t.process = nil
+        if t.cancelRequested { return "Cancelled" }
+        guard let macSums, let device else {
+            return "Couldn’t read the copy back to check it. The copy was removed."
+        }
+        if macSums == device { return nil }
+        if !t.isDirectory { return "The copy isn’t the same as the original (checksums differ). The copy was removed." }
+        let differ = Set(macSums.keys).union(device.keys).filter { macSums[$0] != device[$0] }.count
+        return "\(differ == 1 ? "1 file isn’t" : "\(differ) files aren’t") the same as the original (checksums differ). The copy was removed."
     }
 
     /// Deletes `path` on the transfer's destination side. Returns an error message, or nil.

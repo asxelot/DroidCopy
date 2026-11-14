@@ -31,6 +31,22 @@ public enum Parse {
         return items.sortedForDisplay()
     }
 
+    /// Lines of `md5sum`: "<hash>  <name>". A name md5sum had to escape starts with a backslash.
+    public static func checksums(_ output: String) -> [String: String] {
+        var sums: [String: String] = [:]
+        for raw in output.split(separator: "\n") {
+            var line = Substring(raw)
+            if line.hasPrefix("\\") { line = line.dropFirst() }
+            guard let space = line.firstIndex(of: " ") else { continue }
+            let hash = line[..<space]
+            var name = line[space...].drop(while: { $0 == " " })
+            if name.hasPrefix("*") { name = name.dropFirst() }
+            guard hash.count == 32, !name.isEmpty else { continue }
+            sums[String(name)] = hash.lowercased()
+        }
+        return sums
+    }
+
     /// `df -k <dir>`: the "Available" column of the last line, in bytes.
     public static func dfAvailableBytes(_ output: String) -> Int64? {
         guard let line = output.split(whereSeparator: \.isNewline)

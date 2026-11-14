@@ -93,6 +93,13 @@ final class AppModel: ObservableObject {
         }
     }
     @Published var favorites: [Favorite] = []
+    /// Settings ▸ "Check copies by content": compare checksums after each copy (slower).
+    @Published var checkContents: Bool {
+        didSet {
+            defaults.set(checkContents, forKey: Self.checkContentsKey)
+            queue.checkContents = checkContents
+        }
+    }
     /// Set to a path to start renaming that row in place; the table clears it once editing starts.
     @Published var renamingPath: String?
     /// Items cut with ⌘X, shown dimmed until they're pasted somewhere or the clipboard changes.
@@ -139,6 +146,7 @@ final class AppModel: ObservableObject {
         .appendingPathComponent("DroidCopy")
     nonisolated static let defaultClipboardCache = cacheRoot.appendingPathComponent("Clipboard")
     private static let showHiddenKey = "showHiddenFiles"
+    static let checkContentsKey = "checkContents"
 
     init(adb: Adb? = Adb.locate(), pasteboard: NSPasteboard = .general,
          clipboardCache: URL = AppModel.defaultClipboardCache,
@@ -150,7 +158,9 @@ final class AppModel: ObservableObject {
         self.openCache = openCache
         self.defaults = defaults
         self.showHidden = defaults.bool(forKey: Self.showHiddenKey)
+        self.checkContents = defaults.bool(forKey: Self.checkContentsKey)
         self.queue = TransferQueue(adb: adb ?? Adb(path: "/usr/bin/false"))
+        queue.checkContents = checkContents
         queue.onFinished = { [weak self] t in self?.transferFinished(t) }
     }
 

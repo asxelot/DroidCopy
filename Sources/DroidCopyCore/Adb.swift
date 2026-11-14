@@ -307,6 +307,20 @@ public final class Adb: @unchecked Sendable {
     }
 
     /// Removes a folder only if it's empty (`rmdir`), so nothing inside can be lost.
+    /// MD5 of a file (keyed "."), or of every file inside a folder (keyed "./sub/name"), the same
+    /// shape as `LocalFS.checksums`. nil if it couldn't be read. Reads everything, so it takes
+    /// about as long as reading the item from storage; `onStart` lets the caller stop it.
+    public func checksums(_ serial: String, _ path: String,
+                          onStart: (@Sendable (Process) -> Void)? = nil) async -> [String: String]? {
+        let q = Parse.shellQuote(path)
+        let r = await run(["-s", serial, "shell", """
+            if [ -d \(q) ]; then cd \(q) && find . -type f -exec md5sum {} +; \
+            else s=$(md5sum \(q)) && echo "${s%% *}  ."; fi
+            """], onStart: onStart)
+        guard r.ok else { return nil }
+        return Parse.checksums(r.output)
+    }
+
     public func removeEmptyDirectory(_ serial: String, _ path: String) async -> RunResult {
         await shell(serial, "rmdir \(Parse.shellQuote(path))")
     }

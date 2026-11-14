@@ -839,6 +839,7 @@ struct TransferRow: View {
         case .waiting:
             return "Waiting"
         case .running:
+            if transfer.checking { return "Checking the copy against the original…" }
             guard transfer.total > 0 else { return "Preparing…" }
             var parts = ["\(Fmt.bytes(transfer.transferred)) of \(Fmt.bytes(transfer.total))"]
             if transfer.bytesPerSecond > 0 {

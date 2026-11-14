@@ -88,6 +88,7 @@ struct DroidCopyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = AppModel()
     @StateObject private var ui = WindowState()
+    @StateObject private var updates = UpdateChecker()
 
     var body: some Scene {
         Window("DroidCopy", id: "main") {
@@ -98,10 +99,21 @@ struct DroidCopyApp: App {
                 .onAppear {
                     delegate.attach(model)
                     model.start()
+                    Task { await updates.checkIfDue() }
                 }
         }
         .defaultSize(width: 1150, height: 740)
-        .commands { FinderCommands(model: model, ui: ui) }
+        .commands {
+            FinderCommands(model: model, ui: ui)
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { Task { await updates.checkNow() } }
+                    .disabled(updates.checking)
+            }
+        }
+
+        Settings {
+            SettingsView(model: model, updates: updates)
+        }
     }
 }
 

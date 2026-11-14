@@ -13,6 +13,8 @@ public struct FakeAdb {
         case truncate
         /// Writes a partial file, then blocks until killed.
         case hang
+        /// Copies everything, then changes the first byte of the (first) file: same size, wrong content.
+        case corrupt
     }
 
     public let root: URL
@@ -51,6 +53,7 @@ public struct FakeAdb {
             case .fail: return #"head -c 3 "$1" > "$2"; echo "adb: error: failed to copy: Broken pipe" >&2; exit 1"#
             case .truncate: return #"head -c 3 "$1" > "$2""#
             case .hang: return #"head -c 3 "$1" > "$2"; exec sleep 60"#
+            case .corrupt: return #"cp -RL "$1" "$2"; f="$2"; [ -d "$f" ] && f=$(find "$f" -type f | sort | head -1); printf X | dd of="$f" bs=1 count=1 conv=notrunc 2>/dev/null"#
             }
         }
         let devicesFile = root.appendingPathComponent("devices.txt")
