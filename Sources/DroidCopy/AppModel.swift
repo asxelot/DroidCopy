@@ -275,6 +275,7 @@ final class AppModel: ObservableObject {
         cutPaths = []
         cut = nil
         undoManager?.removeAllActions(withTarget: self)
+        copyFingerprints = [:]
         refreshUndoMenu()
     }
 
@@ -482,6 +483,10 @@ final class AppModel: ObservableObject {
 
     /// Refuses to start a second delete, move or copy on the device while one runs.
     private func deviceIsFree() -> Bool {
+        if undoRunning {
+            alertMessage = "Wait for the undo to finish."
+            return false
+        }
         guard let activity else { return true }
         alertMessage = "Wait for the \(activity.noun) to finish."
         return false
@@ -516,12 +521,15 @@ final class AppModel: ObservableObject {
         // Copying into its own folder is Duplicate; moving there does nothing.
         let here = items.filter { Parse.parent($0.path) == dir }
         let elsewhere = items.filter { Parse.parent($0.path) != dir }
-        if copy && !here.isEmpty { await duplicate(here) }
+        // One drag is one undo step, so those copies join the rest unless a clash question comes between.
+        var duplicated: [(String, String)] = []
+        if copy && !here.isEmpty { duplicated = await duplicate(here, recordUndo: elsewhere.isEmpty) }
         guard !elsewhere.isEmpty else { return }
         let clashes = await adb.existingNames(d.serial, in: dir, elsewhere.map(\.name))
         if clashes.isEmpty {
-            await performMove(elsewhere, to: dir, copy: copy, replacing: [])
+            await performMove(elsewhere, to: dir, copy: copy, replacing: [], alsoCopied: duplicated)
         } else {
+            if !duplicated.isEmpty { record(DeviceChange(name: "Duplicate", serial: d.serial, op: .copy(duplicated))) }
             pendingMove = PendingMove(items: elsewhere, destDir: dir, copy: copy,
                                       clashes: elsewhere.map(\.name).filter(clashes.contains))
         }
@@ -535,10 +543,12 @@ final class AppModel: ObservableObject {
         await performMove(items, to: p.destDir, copy: p.copy, replacing: replace ? clashing : [])
     }
 
-    private func performMove(_ items: [FileItem], to dir: String, copy: Bool, replacing: Set<String>) async {
+    private func performMove(_ items: [FileItem], to dir: String, copy: Bool, replacing: Set<String>,
+                             alsoCopied: [(String, String)] = []) async {
         guard let adb, let d = device, !items.isEmpty, deviceIsFree() else { return }
         var landed: Set<String> = []
         var undoable: [(String, String)] = []
+        var replacedSomething = false
         for (i, item) in items.enumerated() {
             activity = DeviceActivity(verb: copy ? "Copying" : "Moving", noun: copy ? "copy" : "move",
                                       name: item.name, index: i + 1, count: items.count, started: Date())
@@ -550,14 +560,19 @@ final class AppModel: ObservableObject {
                 alertMessage = "Couldn’t \(copy ? "copy" : "move") “\(item.name)”: \(r.message)"
                 break
             }
-            if !copy { pathMoved(from: item.path, to: dest) }
+            if copy { await noteCopy(dest) } else { pathMoved(from: item.path, to: dest) }
             landed.insert(dest)
-            // A replaced item is gone for good, so that one can't be put back.
-            if !replace { undoable.append((item.path, dest)) }
+            undoable.append((item.path, dest))
+            replacedSomething = replacedSomething || replace
         }
         activity = nil
-        if !undoable.isEmpty {
-            record(DeviceChange(name: copy ? "Copy" : "Move", serial: d.serial, op: copy ? .copy(undoable) : .move(undoable)))
+        // A replaced item is gone for good, so a move or copy that replaced one can't be undone at
+        // all: undoing only the rest would leave it half done.
+        let pairs = alsoCopied + undoable
+        if replacedSomething {
+            if !alsoCopied.isEmpty { record(DeviceChange(name: "Duplicate", serial: d.serial, op: .copy(alsoCopied))) }
+        } else if !pairs.isEmpty {
+            record(DeviceChange(name: copy ? "Copy" : "Move", serial: d.serial, op: copy ? .copy(pairs) : .move(pairs)))
         }
         cutPaths.subtract(items.map(\.path))
         if dir == deviceDir { selectAfterLoad = landed; deviceSelection = [] }
@@ -565,8 +580,10 @@ final class AppModel: ObservableObject {
     }
 
     /// ⌘D: copies each item next to itself as "name copy", like Finder, and selects the copies.
-    func duplicate(_ items: [FileItem]) async {
-        guard let adb, let d = device, !items.isEmpty, deviceIsFree() else { return }
+    /// Returns each original and its copy; `recordUndo: false` leaves the undo step to the caller.
+    @discardableResult
+    func duplicate(_ items: [FileItem], recordUndo: Bool = true) async -> [(String, String)] {
+        guard let adb, let d = device, !items.isEmpty, deviceIsFree() else { return [] }
         var made: Set<String> = []
         var copies: [(String, String)] = []
         var takenByDir: [String: Set<String>] = [:]
@@ -584,14 +601,16 @@ final class AppModel: ObservableObject {
                 alertMessage = "Couldn’t duplicate “\(item.name)”: \(r.message)"
                 break
             }
+            await noteCopy(dest)
             made.insert(dest)
             copies.append((item.path, dest))
         }
         activity = nil
-        if !copies.isEmpty { record(DeviceChange(name: "Duplicate", serial: d.serial, op: .copy(copies))) }
+        if recordUndo && !copies.isEmpty { record(DeviceChange(name: "Duplicate", serial: d.serial, op: .copy(copies))) }
         selectAfterLoad = made
         deviceSelection = []
         await loadDevice()
+        return copies
     }
 
     // MARK: Undo
@@ -657,6 +676,34 @@ final class AppModel: ObservableObject {
     }
     /// The undo or redo running on the device. Tests wait for it.
     private(set) var undoTask: Task<Void, Never>?
+    /// From the moment ⌘Z is pressed until the device has caught up, so a second press waits.
+    private var undoRunning = false
+    /// What each copy made on the device held when it was made. Undoing a copy deletes it, so it
+    /// must still be exactly that: nothing added to it, and not something else by the same name.
+    private var copyFingerprints: [String: String] = [:]
+
+    private func noteCopy(_ path: String) async {
+        guard let adb, let d = device else { return }
+        copyFingerprints[path] = await adb.fingerprint(d.serial, path)
+    }
+
+    /// Why ⌘Z or ⇧⌘Z can't run now, or nil. Undoing during other device work, or while copies from
+    /// the Mac are writing into folders it might move, could pull things out from under them.
+    var undoBlocker: String? {
+        if undoRunning { return "Wait for the undo to finish." }
+        if let activity { return "Wait for the \(activity.noun) to finish." }
+        if queue.hasActive { return "Wait for the copies to finish." }
+        return nil
+    }
+
+    /// Edit ▸ Undo, when no text field is being typed in.
+    func undo() {
+        if let why = undoBlocker { alertMessage = why } else { undoManager?.undo() }
+    }
+
+    func redo() {
+        if let why = undoBlocker { alertMessage = why } else { undoManager?.redo() }
+    }
 
     /// Makes `done` the next thing ⌘Z reverses.
     private func record(_ done: DeviceChange) {
@@ -679,7 +726,11 @@ final class AppModel: ObservableObject {
     private func run(_ change: DeviceChange) {
         let verb = undoManager?.isRedoing == true ? "redo" : "undo"
         registerReversal(of: change)
-        undoTask = Task { await perform(change, verb: verb) }
+        undoRunning = true
+        undoTask = Task {
+            await perform(change, verb: verb)
+            undoRunning = false
+        }
     }
 
     private func perform(_ change: DeviceChange, verb: String) async {
@@ -712,6 +763,7 @@ final class AppModel: ObservableObject {
                 step(p.source, i, pairs.count)
                 let r = await adb.copy(d.serial, from: p.source, to: p.copy)
                 if !r.ok { failure = r.message; break }
+                await noteCopy(p.copy)
                 touched.append(p.copy)
             }
         case .removeCopies(let pairs):
@@ -722,16 +774,33 @@ final class AppModel: ObservableObject {
                     failure = "“\((p.source as NSString).lastPathComponent)” is gone, so its copy is kept."
                     break
                 }
+                // Anything added to the copy since, or a different item now at its path, exists
+                // nowhere else, and a delete can't be taken back.
+                let now = await adb.fingerprint(d.serial, p.copy)
+                guard let made = copyFingerprints[p.copy], now == made else {
+                    failure = "“\((p.copy as NSString).lastPathComponent)” has changed since it was copied, so it’s kept."
+                    break
+                }
                 let r = await adb.delete(d.serial, p.copy)
                 if !r.ok { failure = r.message; break }
+                copyFingerprints[p.copy] = nil
                 pathDeleted(p.copy)
             }
         case .makeFolder(let path):
+            step(path, 0, 1)
             let r = await adb.makeDirectory(d.serial, path)
             if r.ok { touched.append(path) } else { failure = r.message }
         case .removeFolder(let path):
+            step(path, 0, 1)
             let r = await adb.removeEmptyDirectory(d.serial, path)
-            if !r.ok { failure = "“\((path as NSString).lastPathComponent)” isn’t empty any more." }
+            let name = (path as NSString).lastPathComponent
+            if r.ok {
+                pathDeleted(path)
+            } else if await adb.exists(d.serial, path) {
+                failure = "“\(name)” isn’t empty any more."
+            } else {
+                failure = "“\(name)” is no longer there."
+            }
         }
         activity = nil
         if let failure { fail(failure) }

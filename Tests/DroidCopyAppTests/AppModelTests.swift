@@ -46,13 +46,13 @@ final class Harness {
 
     /// ⌘Z, then waits for the device to catch up.
     func undoLast() async {
-        undo.undo()
+        model.undo()
         await model.undoTask?.value
         await settle()
     }
 
     func redoLast() async {
-        undo.redo()
+        model.redo()
         await model.undoTask?.value
         await settle()
     }
@@ -1291,4 +1291,137 @@ final class Harness {
         #expect(!h.exists("untitled folder"))
         #expect(!h.undo.canUndo)
     }
+
+    @Test func undoACopyKeepsItIfSomethingWasAddedToIt() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("Photos")
+        try writeFile(Parse.join(h.dev, "Photos/a.jpg"), "a")
+        await h.open()
+        await h.model.duplicate([h.item("Photos")!])
+        try writeFile(Parse.join(h.dev, "Photos copy/new.jpg"), "only here")
+
+        await h.undoLast()
+        #expect(readFile(Parse.join(h.dev, "Photos copy/new.jpg")) == "only here")
+        #expect(h.model.alertMessage?.contains("has changed since it was copied") == true)
+    }
+
+    @Test func undoACopyKeepsADifferentItemThatTookItsName() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "a.txt"), "a")
+        await h.open()
+        await h.model.duplicate([h.item("a.txt")!])
+        try writeFile(Parse.join(h.dev, "a copy.txt"), "something else entirely")
+
+        await h.undoLast()
+        #expect(readFile(Parse.join(h.dev, "a copy.txt")) == "something else entirely")
+    }
+
+    @Test func pressingUndoTwiceQuicklyKeepsTheHistory() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "a.txt"), "a")
+        try writeFile(Parse.join(h.dev, "c.txt"), "c")
+        await h.open()
+        await h.model.rename(h.item("a.txt")!, to: "b.txt")
+        await h.model.rename(h.item("c.txt")!, to: "d.txt")
+
+        h.model.undo()
+        h.model.undo()  // while the first is still on the device
+        await h.model.undoTask?.value
+        await h.settle()
+        #expect(h.exists("c.txt") && h.exists("b.txt"))
+        #expect(h.model.alertMessage == "Wait for the undo to finish.")
+        // The earlier rename can still be undone.
+        #expect(h.undo.undoActionName == "Rename")
+        await h.undoLast()
+        #expect(h.exists("a.txt"))
+    }
+
+    @Test func undoWaitsForOtherDeviceWork() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "a.txt"), "a")
+        await h.open()
+        await h.model.rename(h.item("a.txt")!, to: "b.txt")
+        h.model.activity = AppModel.DeviceActivity(verb: "Deleting", noun: "delete", name: "x", index: 1, count: 1, started: Date())
+        h.model.undo()
+        #expect(h.model.alertMessage == "Wait for the delete to finish.")
+        #expect(h.exists("b.txt") && h.undo.canUndo)
+        h.model.activity = nil
+        await h.undoLast()
+        #expect(h.exists("a.txt"))
+    }
+
+    @Test func undoWaitsForCopiesFromTheMac() async throws {
+        let h = try Harness(push: .hang)
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "a.txt"), "a")
+        let big = h.mac.appendingPathComponent("big.bin")
+        try writeFile(big.path, "0123456789")
+        await h.open()
+        await h.model.rename(h.item("a.txt")!, to: "b.txt")
+        h.model.copyToDevice([big])
+        await waitUntil { h.model.queue.hasActive }
+        h.model.undo()
+        #expect(h.model.alertMessage == "Wait for the copies to finish.")
+        #expect(h.exists("b.txt") && h.undo.canUndo)
+        await h.model.queue.cancelAllAndWait()
+    }
+
+    @Test func undoNewFolderTakesItOffTheSidebar() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        await h.open()
+        await h.model.newFolder()
+        h.model.addToSidebar([h.item("untitled folder")!])
+        #expect(h.model.favorites.count == 1)
+        await h.undoLast()
+        #expect(!h.exists("untitled folder"))
+        #expect(h.model.favorites.isEmpty)
+    }
+
+    @Test func undoNewFolderSaysSoWhenItsAlreadyGone() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        await h.open()
+        await h.model.newFolder()
+        try FileManager.default.removeItem(atPath: Parse.join(h.dev, "untitled folder"))
+        await h.undoLast()
+        #expect(h.model.alertMessage?.contains("is no longer there") == true)
+    }
+
+    @Test func oneCopyDragIsOneUndoStep() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try h.mkdir("Games")
+        try writeFile(Parse.join(h.dev, "Games/a.txt"), "a")
+        try writeFile(Parse.join(h.dev, "b.txt"), "b")
+        await h.open()
+        let a = FileItem(name: "a.txt", path: Parse.join(h.dev, "Games/a.txt"), isDirectory: false, size: 1, modified: nil)
+        await h.model.move([a, h.item("b.txt")!], to: Parse.join(h.dev, "Games"), copy: true)
+        #expect(h.exists("Games/a copy.txt") && h.exists("Games/b.txt"))
+        #expect(h.undo.undoActionName == "Copy")
+
+        await h.undoLast()
+        #expect(!h.exists("Games/a copy.txt") && !h.exists("Games/b.txt"))
+        #expect(!h.undo.canUndo)
+    }
+
+    @Test func aMoveThatReplacedOneOfSeveralCantBeUndone() async throws {
+        let h = try Harness()
+        defer { h.cleanUp() }
+        try writeFile(Parse.join(h.dev, "a.txt"), "new")
+        try writeFile(Parse.join(h.dev, "b.txt"), "b")
+        try h.mkdir("Games")
+        try writeFile(Parse.join(h.dev, "Games/a.txt"), "old")
+        await h.open()
+        await h.model.move([h.item("a.txt")!, h.item("b.txt")!], to: Parse.join(h.dev, "Games"))
+        await h.model.resolve(try #require(h.model.pendingMove), replace: true)
+        #expect(h.exists("Games/b.txt"))
+        // Undoing only b would leave the move half done.
+        #expect(!h.undo.canUndo)
+    }
 }
+

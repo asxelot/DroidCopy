@@ -296,6 +296,16 @@ public final class Adb: @unchecked Sendable {
         Parse.join(Parse.parent(path), ".dc-old~" + (path as NSString).lastPathComponent)
     }
 
+    /// What an item holds: the relative path, kind and size of it and everything inside, sorted.
+    /// Tells whether a copy changed after DroidCopy made it.
+    public func fingerprint(_ serial: String, _ path: String) async -> String? {
+        let dir = Parse.shellQuote(Parse.parent(path))
+        let name = Parse.shellQuote("./" + (path as NSString).lastPathComponent)
+        let r = await shell(serial, "cd \(dir) && find \(name) -exec stat -c '%F/%s/%n' {} + | sort", timeout: slowTimeout)
+        guard r.ok, !r.output.isEmpty else { return nil }
+        return r.output
+    }
+
     /// Removes a folder only if it's empty (`rmdir`), so nothing inside can be lost.
     public func removeEmptyDirectory(_ serial: String, _ path: String) async -> RunResult {
         await shell(serial, "rmdir \(Parse.shellQuote(path))")

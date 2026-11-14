@@ -74,9 +74,11 @@ rule as copies from the Mac.
 
 **Undo** (⌘Z) and **Redo** (⇧⌘Z) work for renames, moves, copies on the device, Duplicate and New
 Folder. The Edit menu says what will be undone ("Undo Rename"). Undoing a copy removes it, but only
-while the original is still there. Undoing New Folder removes the folder only if it's still empty. A
-move or copy that replaced an existing item can't be undone, because the old item is gone. Deletes
-can't be undone either, and copies from the Mac aren't on the list.
+while the original is still there and the copy is unchanged (nothing added to it, nothing else put
+in its place). Undoing New Folder removes the folder only if it's still empty. A move or copy that
+replaced an existing item can't be undone, because the old item is gone. Deletes can't be undone
+either, and copies from the Mac aren't on the list. Undo waits until other work on the device and
+copies from the Mac have finished.
 
 **Copying to the Mac**
 - Drag items from the list into any Finder window or onto the Desktop. Finder asks DroidCopy for

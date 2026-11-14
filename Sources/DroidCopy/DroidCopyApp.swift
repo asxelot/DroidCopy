@@ -142,13 +142,13 @@ struct FinderCommands: Commands {
                 .keyboardShortcut("e")
                 .disabled(model.device == nil || model.queue.hasActive || model.activity != nil)
         }
-        // Sent to the first responder like the standard items, so a text field being typed in
-        // undoes its typing; otherwise the window's undo manager reverses the last device change.
+        // A text field being typed in undoes its typing; otherwise the window's undo manager
+        // reverses the last device change, once the device is free.
         CommandGroup(replacing: .undoRedo) {
-            Button(model.undoTitle) { NSApp.sendAction(Selector(("undo:")), to: nil, from: nil) }
+            Button(model.undoTitle) { unlessTyping(Selector(("undo:"))) { model.undo() } }
                 .keyboardShortcut("z")
                 .disabled(!model.canUndo)
-            Button(model.redoTitle) { NSApp.sendAction(Selector(("redo:")), to: nil, from: nil) }
+            Button(model.redoTitle) { unlessTyping(Selector(("redo:"))) { model.redo() } }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
                 .disabled(!model.canRedo)
         }
