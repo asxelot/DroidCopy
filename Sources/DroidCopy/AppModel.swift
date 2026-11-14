@@ -354,6 +354,12 @@ final class AppModel: ObservableObject {
         return nil
     }
 
+    /// Under the window title: "22 GB available" on the storage being shown. Empty until known.
+    var freeSpaceText: String {
+        guard device != nil, let deviceFree else { return "" }
+        return "\(Fmt.bytes(deviceFree)) available"
+    }
+
     /// Finder's status bar: "12 items, 22 GB available" or "2 of 12 selected, 22 GB available".
     var statusText: String {
         let shown = visibleItems.count

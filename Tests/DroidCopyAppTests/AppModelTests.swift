@@ -109,6 +109,7 @@ final class Harness {
         #expect(h.model.deviceItems.map(\.name) == ["ROMs", "a.txt"])
         #expect(!h.model.deviceLoading)
         #expect(h.model.deviceFree != nil)
+        #expect(h.model.freeSpaceText == "\(Fmt.bytes(h.model.deviceFree!)) available")
         #expect(!h.model.deviceCanGoUp)
 
         h.model.openDevice(h.item("ROMs")!)
@@ -321,6 +322,7 @@ final class Harness {
         #expect(h.model.device == nil && h.model.deviceItems.isEmpty)
         #expect(h.model.ejectedSerial == "FAKE123")
         #expect(h.model.alertMessage == nil)
+        #expect(h.model.freeSpaceText.isEmpty, "no free space under the title once ejected")
 
         await h.model.pollDevices()
         #expect(h.model.device == nil, "still plugged in, but ejected")

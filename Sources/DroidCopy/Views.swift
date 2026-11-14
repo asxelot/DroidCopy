@@ -36,6 +36,7 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 420, ideal: 860)
         }
         .navigationTitle(model.folderTitle)
+        .navigationSubtitle(model.freeSpaceText)
         .toolbar { BrowserToolbar() }
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search")
         .frame(minWidth: 680, minHeight: 440)

@@ -90,6 +90,7 @@ The window works like a Finder window in list view, for the connected device.
   folder you were in last.
 - **Search** (⌘F, or the magnifier in the toolbar) narrows the folder being shown. As in Finder, the
   field opens when you use it and closes again when it's empty. You can also type a name to jump to it.
+- **Free space** on the storage you're in is shown under the window title.
 - **View menu:** show hidden files (⇧⌘.). The path bar (⌥⌘P) and the status bar (⌘/, item
   count and free space) are hidden unless you turn them on, as in Finder.
 - **Opening files:** double-click a file to copy it to the Mac and open it there. Space shows it
