@@ -24,12 +24,13 @@ a Retroid Pocket 5, but works with any Android device that has USB debugging on.
 
 ## Installing
 
-1. Download `DroidCopy-1.0.zip` from the
-   [latest release](https://github.com/asxelot/DroidCopy/releases/latest).
-2. Open the zip and drag `DroidCopy.app` into **Applications**.
-3. Open DroidCopy. The app isn't notarized by Apple, so the first time macOS refuses to open it.
-   Go to **System Settings ▸ Privacy & Security**, scroll down to the message about DroidCopy,
-   click **Open Anyway** and confirm. After that it opens normally.
+1. Download the `.dmg` file from the [latest release](https://github.com/asxelot/DroidCopy/releases/latest)
+   and open it.
+2. In the window that opens, drag **DroidCopy** onto the **Applications** folder next to it. Then
+   eject the disk image (the ⏏ button next to it in Finder's sidebar).
+3. Open DroidCopy from Applications. The app isn't notarized by Apple, so the first time macOS
+   refuses to open it. Go to **System Settings ▸ Privacy & Security**, scroll down to the message
+   about DroidCopy, click **Open Anyway** and confirm. After that it opens normally.
 
    Or, instead of step 3, run this once in Terminal:
 
@@ -37,7 +38,8 @@ a Retroid Pocket 5, but works with any Android device that has USB debugging on.
    xattr -dr com.apple.quarantine /Applications/DroidCopy.app
    ```
 
-To update, quit DroidCopy and replace the app in Applications with the new one.
+To update, quit DroidCopy and drag the new version onto Applications the same way, replacing the
+old one.
 
 ### Turning on USB debugging
 
@@ -59,6 +61,15 @@ Only the Xcode Command Line Tools are needed; full Xcode isn't.
 ```sh
 ./build-app.sh                      # builds build/DroidCopy.app (ad-hoc signed)
 mv build/DroidCopy.app /Applications/
+```
+
+To make the disk image the releases use (`build/DroidCopy-<version>.dmg`, with the window that
+shows the app and an Applications shortcut), install [dmgbuild](https://github.com/dmgbuild/dmgbuild)
+and run `make-dmg.sh`:
+
+```sh
+pip3 install dmgbuild
+./make-dmg.sh
 ```
 
 Each build has a new ad-hoc signature, so macOS may ask again for access to folders like
