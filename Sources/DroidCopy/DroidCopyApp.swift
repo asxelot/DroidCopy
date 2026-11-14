@@ -18,6 +18,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // waits on tasks that need the main queue, and a block would be holding it.
             NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
         }
+        // The toolbar's search field starts out as a magnifier button, as in Finder.
+        NotificationCenter.default.addObserver(forName: NSToolbar.willAddItemNotification, object: nil, queue: nil) { note in
+            guard let item = note.userInfo?["item"] as? NSSearchToolbarItem else { return }
+            MainActor.assumeIsolated { CompactSearch.apply(to: item) }
+        }
+        NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: nil) { note in
+            MainActor.assumeIsolated {
+                guard let window = note.object as? NSWindow else { return }
+                for case let item as NSSearchToolbarItem in window.toolbar?.items ?? [] { CompactSearch.apply(to: item) }
+            }
+        }
     }
 
     static func isMainWindow(_ window: NSWindow) -> Bool {
@@ -212,5 +223,27 @@ struct FinderCommands: Commands {
         if let search = toolbar.items.compactMap({ $0 as? NSSearchToolbarItem }).first {
             search.beginSearchInteraction()
         }
+    }
+}
+
+/// Finder's search: a magnifier button that opens into a field when clicked (or on ⌘F) and closes
+/// again when you leave it empty. Left alone, the toolbar's search field takes a third of the
+/// window.
+@MainActor
+enum CompactSearch {
+    /// The open field's width, like Finder's.
+    static let openWidth: CGFloat = 240
+    static let marker = NSUserInterfaceItemIdentifier("DroidCopy.compactSearch")
+
+    static func apply(to item: NSSearchToolbarItem) {
+        let field = item.searchField
+        guard !field.constraints.contains(where: { $0.identifier == marker.rawValue }) else { return }
+        item.preferredWidthForSearchField = openWidth
+        // A narrow width the item can't fit a field into collapses it into its button. At low
+        // priority, so it gives way to the open width while searching.
+        let narrow = field.widthAnchor.constraint(equalToConstant: 30)
+        narrow.priority = .defaultLow
+        narrow.identifier = marker.rawValue
+        narrow.isActive = true
     }
 }
