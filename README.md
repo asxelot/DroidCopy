@@ -7,8 +7,7 @@ a Retroid Pocket 5, but works with any Android device that has USB debugging on.
 
 ## What you need
 
-- macOS 14 or later. The ready-made download is for Apple silicon Macs; on an Intel Mac, build it
-  from source (below).
+- macOS 14 or later, on an Apple silicon or Intel Mac.
 - `adb`. The easiest way to get it is [Homebrew](https://brew.sh):
 
   ```sh
@@ -59,7 +58,7 @@ If DroidCopy says the device isn't authorized, unlock the device and look for th
 Only the Xcode Command Line Tools are needed; full Xcode isn't.
 
 ```sh
-./build-app.sh                      # builds build/DroidCopy.app (ad-hoc signed)
+./build-app.sh                      # builds build/DroidCopy.app (universal, ad-hoc signed)
 mv build/DroidCopy.app /Applications/
 ```
 

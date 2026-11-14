@@ -3,11 +3,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-swift build -c release --product DroidCopy
+# A universal app: runs natively on Apple silicon and Intel Macs.
+ARCHS=(--arch arm64 --arch x86_64)
+swift build -c release --product DroidCopy "${ARCHS[@]}"
+BIN=$(swift build -c release "${ARCHS[@]}" --show-bin-path)
 APP=build/DroidCopy.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp .build/release/DroidCopy "$APP/Contents/MacOS/DroidCopy"
+cp "$BIN/DroidCopy" "$APP/Contents/MacOS/DroidCopy"
 
 # The app icon, drawn by icon/icon.swift.
 ICONSET=$(mktemp -d)/AppIcon.iconset
