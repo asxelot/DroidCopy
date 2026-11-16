@@ -29,8 +29,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key><string>DroidCopy</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.1</string>
-    <key>CFBundleVersion</key><string>3</string>
+    <key>CFBundleShortVersionString</key><string>1.2</string>
+    <key>CFBundleVersion</key><string>4</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSLocalNetworkUsageDescription</key><string>DroidCopy looks for Android devices with Wi-Fi debugging turned on, so you can connect without typing an address.</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
@@ -67,7 +67,7 @@ cat > "$HELPER/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key><string>local.droidcopy.adb-helper</string>
     <key>CFBundleExecutable</key><string>adb-helper</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.1</string>
+    <key>CFBundleShortVersionString</key><string>1.2</string>
     <key>LSBackgroundOnly</key><true/>
 </dict>
 </plist>
