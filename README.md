@@ -143,10 +143,24 @@ already installed is updated and keeps its data. Installs show in the transfer l
 
 **Over Wi-Fi:** **File ▸ Connect over Wi-Fi…** (also on the "No Device" screen). The device and the
 Mac need to be on the same network, and copying is slower than over a cable.
+- **On this network** lists the devices DroidCopy finds by itself, with no address to type: it
+  looks at every device on the Mac's network for adb on port 5555 or Wireless debugging (whose
+  port changes each time it's turned on), checking first where it found devices before. A device
+  shows its name once it has been connected, over Wi-Fi or by cable; until then, its address. The
+  first search on a network can take up to a minute; devices show up as they're found.
+- To turn on Wireless debugging (Android 11 or later): first unlock Developer options by tapping
+  **Settings ▸ About phone ▸ Build number** seven times (it may be under Software information on
+  some devices), then open **Settings ▸ System ▸ Developer options** and turn on **Wireless
+  debugging**. The Wi-Fi sheet has these steps too, under **How do I turn on Wireless debugging?**
+- A device with Wireless debugging that this Mac isn't paired with yet asks for pairing when you
+  click **Connect**: on the device, tap the words **Wireless debugging** (not its switch) to open its
+  screen, tap **Pair device with pairing code**, and type just the code.
+  DroidCopy finds the pairing port, pairs, and connects.
 - With the cable plugged in, **Switch to Wi-Fi** turns on adb over Wi-Fi (`adb tcpip 5555`) and
   connects; then you can unplug. Restarting the device turns it off again.
 - Or connect to an address. On Android 11 or later, **Developer options ▸ Wireless debugging**
-  shows one; the first time, pair with the code from **Pair device with pairing code**.
+  shows one; the first time, pair with the code from **Pair device with pairing code** (the
+  address can stay empty when the device is listed under **On this network**).
 - **Eject** on a Wi-Fi device ends that connection.
 
 **Settings** (⌘,):
@@ -221,6 +235,12 @@ them afterwards. They run only when you name a device:
 DROIDCOPY_DEVICE=<serial from `adb devices`> swift test --filter DeviceIntegrationTests
 ```
 
+`NetworkScanTests` can also search your real network and print what it finds:
+
+```sh
+DROIDCOPY_SCAN=1 swift test --filter realNetwork
+```
+
 `SnapshotTests` renders the transfer panel to images (and a GIF of its progress bar) for showing a
 change. It runs only when you give it a folder:
 
@@ -236,6 +256,7 @@ DROIDCOPY_SNAPSHOT_DIR=/tmp/snap swift test --filter SnapshotTests
 
 **Known quirks with the Command Line Tools**
 - `swift test` sometimes fails to build with "plugin for module 'TestingMacros' not found". Run
-  it again, or run `swift package clean` first.
+  it again, or run `swift package clean` first. If it keeps failing, point the compiler at the
+  plugin: `swift test -Xswiftc -plugin-path -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing`.
 - SwiftUI's `@State` is a macro whose plugin the Command Line Tools don't include, so views use
   `@StateObject` with small `ObservableObject`s instead.

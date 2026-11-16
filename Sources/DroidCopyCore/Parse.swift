@@ -86,6 +86,24 @@ public enum Parse {
         return nil
     }
 
+    /// The addresses in `arp -an` output that a device answered for ("incomplete" ones didn't).
+    public static func arpAddresses(_ output: String) -> [String] {
+        output.split(whereSeparator: \.isNewline).compactMap { line in
+            guard !line.contains("incomplete"), let open = line.firstIndex(of: "("),
+                  let close = line[open...].firstIndex(of: ")") else { return nil }
+            return String(line[line.index(after: open)..<close])
+        }
+    }
+
+    /// The router in `route -n get default` output.
+    public static func gateway(_ output: String) -> String? {
+        for line in output.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            if parts.count == 2, parts[0] == "gateway", !parts[1].isEmpty { return parts[1] }
+        }
+        return nil
+    }
+
     /// "192.168.1.20" → "192.168.1.20:5555": adb's usual port when none is given. nil if it
     /// doesn't look like an address.
     public static func adbAddress(_ input: String, defaultPort: Int = 5555) -> String? {

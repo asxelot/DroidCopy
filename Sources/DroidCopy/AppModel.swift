@@ -308,8 +308,13 @@ final class AppModel: ObservableObject {
         guard let adb else { return (false, "adb isn’t installed.") }
         guard let address = Parse.adbAddress(input) else { return (false, "Enter an address like 192.168.1.20:5555.") }
         let c = await adb.connect(address)
-        guard c.ok else { return (false, c.message) }
+        guard c.ok else {
+            // adb keeps a failed address in its list as "offline" and keeps retrying it.
+            await adb.disconnect(address)
+            return (false, c.message)
+        }
         defaults.set(address, forKey: Self.wifiAddressKey)
+        remember(address)
         // An ejected device may be the one asked for; the person wants it now.
         ejectedSerial = nil
         await pollDevices()
@@ -317,15 +322,182 @@ final class AppModel: ObservableObject {
     }
 
     /// Pairs with a device using the code from its "Pair device with pairing code" screen.
+    ///
+    /// `input` is the address and port shown with the code. Without a port (or empty, when a
+    /// Wireless debugging device was found on the network), the pairing screen's port is found by
+    /// looking for the port that opened on the device. After pairing, connects to the device if
+    /// it's known where it listens.
     func pairWiFi(_ input: String, code: String) async -> (ok: Bool, message: String) {
         guard let adb else { return (false, "adb isn’t installed.") }
-        guard let address = Parse.adbAddress(input, defaultPort: 0), !address.hasSuffix(":0") else {
-            return (false, "Enter the IP address and port shown with the pairing code, like 192.168.1.20:37099.")
-        }
         let code = code.trimmingCharacters(in: .whitespaces)
+        let typed = input.trimmingCharacters(in: .whitespaces)
+        let askForAddress = "Enter the IP address and port shown with the pairing code, like 192.168.1.20:37099."
+        var host: String
+        var pairAt: [String]
+        // Without a typed address, every device with Wireless debugging is a candidate: the one
+        // showing the code is the one with its pairing port open.
+        var anyHost = false
+        if let address = Parse.adbAddress(typed, defaultPort: 0), !address.hasSuffix(":0") {
+            host = String(address[..<address.lastIndex(of: ":")!])
+            pairAt = [address]
+        } else {
+            let wireless = foundDevices.filter { $0.kind == .wirelessDebugging }
+            if !typed.isEmpty {
+                guard Parse.adbAddress(typed) != nil else { return (false, askForAddress) }
+                host = typed
+            } else if let t = pairTarget {
+                host = t.host
+                anyHost = true
+            } else if let first = wireless.first {
+                host = first.host
+                anyHost = true
+            } else {
+                return (false, askForAddress)
+            }
+            pairAt = []
+        }
         guard !code.isEmpty else { return (false, "Enter the pairing code shown on the device.") }
-        let p = await adb.pair(address, code: code)
-        return p.ok ? (true, "Paired. Now connect to the address and port shown under Wireless debugging.") : (false, p.message)
+        if pairAt.isEmpty {
+            // The pairing screen listens on a port of its own while it's open: one that isn't the
+            // device's Wireless debugging port.
+            var hosts = [host]
+            if anyHost {
+                for d in foundDevices where d.kind == .wirelessDebugging && !hosts.contains(d.host) { hosts.append(d.host) }
+            }
+            let found = foundDevices
+            let scan = scanPorts
+            pairAt = await withTaskGroup(of: [String].self) { group in
+                for h in hosts {
+                    group.addTask {
+                        let known = Set(found.filter { $0.host == h }.map(\.port))
+                        return await scan(h).filter { !known.contains($0) }.map { "\(h):\($0)" }
+                    }
+                }
+                var all: [String] = []
+                for await list in group { all += list }
+                return all
+            }
+            guard !pairAt.isEmpty else {
+                let whereTo = hosts.count == 1 ? "on \(host)" : "on any device"
+                return (false, "Couldn’t find the pairing screen \(whereTo). Open “Pair device with pairing code” on the device and keep the code on screen, then try again.")
+            }
+        }
+        var last = ""
+        var pairedHost: String?
+        for address in pairAt {
+            let p = await adb.pair(address, code: code)
+            if p.ok {
+                pairedHost = String(address[..<address.lastIndex(of: ":")!])
+                break
+            }
+            last = p.message
+        }
+        guard let pairedHost else { return (false, last) }
+        host = pairedHost
+        // Connect straight away when it's known where the device listens.
+        if let target = foundDevices.first(where: { $0.host == host && $0.kind == .wirelessDebugging }) {
+            pairTarget = nil
+            let c = await connectWiFi(target.address)
+            return c.ok ? (true, "Paired and connected to \(target.address).")
+                        : (false, "Paired, but couldn’t connect to \(target.address): \(c.message)")
+        }
+        return (true, "Paired. Now connect to the address and port shown under Wireless debugging.")
+    }
+
+    // MARK: - Finding devices on the network
+
+    /// Devices with adb listening found on the local network, as they turn up.
+    @Published var foundDevices: [FoundDevice] = []
+    @Published var scanning = false
+    @Published var scanProgress = 0.0
+    /// The device that wouldn't connect until it's paired: pairing without an address pairs it.
+    @Published var pairTarget: FoundDevice?
+
+    static let foundAddressesKey = "wifiFoundAddresses"
+
+    /// Searches the network. Replaced in tests.
+    var scanNetwork: @Sendable (_ also: [String], _ found: @escaping @Sendable (FoundDevice) -> Void,
+                                _ progress: @escaping @Sendable (Double) -> Void) async -> [FoundDevice] = {
+        await NetworkScan.find(also: $0, found: $1, progress: $2)
+    }
+    /// Asks what's at an address. Replaced in tests.
+    var probeAddress: @Sendable (_ host: String, _ port: Int) async -> FoundDevice.Kind? = { await NetworkScan.probe($0, $1) }
+    /// The open ports in Android's range on a host. Replaced in tests.
+    var scanPorts: @Sendable (_ host: String) async -> [Int] = { await NetworkScan.openPorts($0) }
+
+    /// Addresses devices were found or connected at before, newest first.
+    var rememberedAddresses: [String] { defaults.stringArray(forKey: Self.foundAddressesKey) ?? [] }
+
+    private func remember(_ address: String) {
+        let list = [address] + rememberedAddresses.filter { $0 != address }
+        defaults.set(Array(list.prefix(10)), forKey: Self.foundAddressesKey)
+    }
+
+    private func addFound(_ d: FoundDevice) {
+        guard !foundDevices.contains(d) else { return }
+        foundDevices.append(d)
+        remember(d.address)
+    }
+
+    static let deviceNamesKey = "wifiDeviceNames"
+
+    /// The name of the device last seen at `host` ("Retroid Pocket 5"). A device found on the
+    /// network doesn't say what it is until it's connected, so names come from connections.
+    func deviceName(at host: String) -> String? {
+        (defaults.dictionary(forKey: Self.deviceNamesKey) as? [String: String])?[host]
+    }
+
+    /// Notes which device is at which address on the network: from a Wi-Fi connection's address,
+    /// or a cabled device's Wi-Fi address, so it has a name when it's found on the network later.
+    private func rememberName(_ d: DeviceInfo) async {
+        var host: String?
+        if d.isNetwork, let colon = d.serial.lastIndex(of: ":") {
+            host = String(d.serial[..<colon])
+        } else if !d.isNetwork, let adb {
+            host = await adb.wifiAddress(d.serial)
+        }
+        guard let host, !host.isEmpty, host.first?.isNumber == true else { return }
+        var names = (defaults.dictionary(forKey: Self.deviceNamesKey) as? [String: String]) ?? [:]
+        guard names[host] != d.displayName else { return }
+        names[host] = d.displayName
+        defaults.set(names, forKey: Self.deviceNamesKey)
+        objectWillChange.send()
+    }
+
+    /// Looks for devices on the network: first where devices were before (Wireless debugging
+    /// keeps its port until it's turned off or the device restarts), then everywhere.
+    func findWiFiDevices() async {
+        guard !scanning else { return }
+        scanning = true
+        scanProgress = 0
+        foundDevices = []
+        let before = rememberedAddresses.compactMap { a -> (String, Int)? in
+            guard let colon = a.lastIndex(of: ":"), let port = Int(a[a.index(after: colon)...]) else { return nil }
+            return (String(a[..<colon]), port)
+        }
+        let probe = probeAddress
+        await withTaskGroup(of: FoundDevice?.self) { group in
+            for (host, port) in before {
+                group.addTask { await probe(host, port).map { FoundDevice(host: host, port: port, kind: $0) } }
+            }
+            for await d in group { if let d { addFound(d) } }
+        }
+        var hosts: [String] = []
+        for (h, _) in before where !hosts.contains(h) { hosts.append(h) }
+        let all = await scanNetwork(hosts, { d in Task { @MainActor [weak self] in self?.addFound(d) } },
+                                    { p in Task { @MainActor [weak self] in self?.scanProgress = max(self?.scanProgress ?? 0, p) } })
+        for d in all { addFound(d) }
+        scanProgress = 1
+        scanning = false
+    }
+
+    /// Connects to a device found on the network. One with Wireless debugging that this Mac isn't
+    /// paired with yet becomes the one pairing pairs with.
+    func connectFound(_ d: FoundDevice) async -> (ok: Bool, message: String) {
+        let r = await connectWiFi(d.address)
+        if r.ok || d.kind != .wirelessDebugging { return r }
+        pairTarget = d
+        return (false, "This Mac isn’t paired with \(d.host) yet. On the device, tap “Pair device with pairing code” under Wireless debugging, then type the code below.")
     }
 
     /// Uses the ejected device again without unplugging it.
@@ -337,6 +509,8 @@ final class AppModel: ObservableObject {
     private func connect(_ d: DeviceInfo) async {
         guard let adb else { return }
         device = d
+        // On the side: it asks the device something, and opening shouldn't wait for it.
+        Task { await rememberName(d) }
         storages = await adb.storages(d.serial)
         if let saved = loadFavorites(d.serial) {
             favorites = saved

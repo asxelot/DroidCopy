@@ -75,13 +75,19 @@ public struct FakeAdb {
               push) do_push "$1" "$2" ;;
               pull) do_pull "$1" "$2" ;;
               connect)
+                # Port 5555 (adb tcpip) connects; any other port only after pairing with its host,
+                # like Wireless debugging.
                 case "$1" in
-                  *:5555) grep -q "^$1 " '\(devicesFile.path)' && { echo "already connected to $1"; exit 0; }
-                          echo "$1  device product:x model:Fake_Phone" >> '\(devicesFile.path)'; echo "connected to $1" ;;
-                  *) echo "failed to connect to '$1': Connection refused" ;;
-                esac ;;
+                  *:5555) ;;
+                  *) [ -e '\(root.path)'/paired-"${1%:*}" ] || { echo "failed to connect to '$1': Connection refused"; exit 0; } ;;
+                esac
+                grep -q "^$1 " '\(devicesFile.path)' && { echo "already connected to $1"; exit 0; }
+                echo "$1  device product:x model:Fake_Phone" >> '\(devicesFile.path)'; echo "connected to $1" ;;
               disconnect) grep -v "^$1 " '\(devicesFile.path)' > '\(devicesFile.path).new'; mv '\(devicesFile.path).new' '\(devicesFile.path)'; echo "disconnected $1" ;;
-              pair) [ "$2" = "123456" ] && echo "Successfully paired to $1 [guid=adb-FAKE]" || { echo "Failed: Wrong password or connection was dropped."; exit 1; } ;;
+              pair)
+                # The pairing screen listens on port 37099.
+                case "$1" in *:37099) ;; *) echo "Failed: Unable to start pairing client."; exit 1 ;; esac
+                [ "$2" = "123456" ] && touch '\(root.path)'/paired-"${1%:*}" && echo "Successfully paired to $1 [guid=adb-FAKE]" || { echo "Failed: Wrong password or connection was dropped."; exit 1; } ;;
               tcpip) echo "restarting in TCP mode port: $1"; touch '\(root.path)'/tcpip-"$1" ;;
               install)
                 [ "$1" = "-r" ] && shift
